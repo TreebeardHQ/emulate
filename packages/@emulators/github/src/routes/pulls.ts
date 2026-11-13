@@ -405,6 +405,8 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     assertBranchCreationAllowed(gh, authUser, repo, baseRef);
     const headBranch = getOrCreateBranch(gh, headRepo, headRef);
     const baseBranch = getOrCreateBranch(gh, repo, baseRef);
+    const nativeGit = store.getData<boolean>("github.native_git") === true ? getNativeGitStore(store) : undefined;
+    const mergeable = nativeGit ? await nativeGit.canMerge(headRepo.full_name, baseBranch.sha, headBranch.sha) : true;
 
     const num = getNextIssueNumber(gh, repo.id);
     const now = timestamp();
@@ -454,8 +456,8 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       merged_at: null,
       merged_by_id: null,
       merge_commit_sha: null,
-      mergeable: true,
-      mergeable_state: "clean",
+      mergeable,
+      mergeable_state: mergeable ? "clean" : "dirty",
       comments: 0,
       review_comments: 0,
       commits: Math.max(1, commitCount),
@@ -571,6 +573,12 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       patch.base_ref = newBase;
       patch.base_sha = bb.sha;
       patch.base_repo_id = repo.id;
+      if (store.getData<boolean>("github.native_git") === true) {
+        const nativeGit = getNativeGitStore(store);
+        const mergeable = await nativeGit.canMerge(repo.full_name, bb.sha, pr.head_sha);
+        patch.mergeable = mergeable;
+        patch.mergeable_state = mergeable ? "clean" : "dirty";
+      }
     }
     if (typeof body.draft === "boolean") {
       patch.draft = body.draft;

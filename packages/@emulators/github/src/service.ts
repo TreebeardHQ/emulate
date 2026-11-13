@@ -7,7 +7,6 @@ import { createAppKeyResolver } from "./index.js";
 import { createNativeGitStore } from "./native-git.js";
 import type { NativeGitPins } from "./native-git.js";
 import { projectNativeGit } from "./native-projection.js";
-import { registerNativeGitPolicy } from "./native-policy.js";
 import { smartHttpRoutes } from "./routes/smart-http.js";
 import { getRevokedTokens } from "./tokens.js";
 
@@ -113,7 +112,7 @@ function redact<T>(value: T, secrets: readonly string[]): T {
   }
   if (Array.isArray(value)) return value.map((entry) => redact(entry, secrets)) as T;
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redact(entry, secrets)])) as T;
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [redact(key, secrets), redact(entry, secrets)])) as T;
   }
   return value;
 }
@@ -208,7 +207,6 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
     register(app, store, webhooks, baseUrl, tokenMap) {
       nativeGit.attach(store);
       store.setData("github.native_git", true);
-      registerNativeGitPolicy(app, store);
       githubPlugin.register(app, store, webhooks, baseUrl, tokenMap);
       smartHttpRoutes({ app, store, webhooks, baseUrl, tokenMap });
     },
@@ -342,7 +340,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       return redact(structuredClone(snapshot(githubServer.store)), secretValues());
     },
     getGitHubActionLedger() {
-      return structuredClone(actions).sort((a, b) => a.sequence - b.sequence);
+      return redact(structuredClone(actions).sort((a, b) => a.sequence - b.sequence), secretValues());
     },
     async replayDelivery(deliveryId) {
       const delivery = await githubServer.webhooks.redeliver(deliveryId);

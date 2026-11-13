@@ -112,20 +112,29 @@ export function smartHttpRoutes(context: RouteContext): void {
           }
           if (!branchName || !after[ref] || !sender) continue;
           for (const pr of gh.pullRequests.findBy("repo_id", repo.id)) {
-            if (pr.state !== "open" || pr.head_repo_id !== repo.id || pr.head_ref !== branchName || pr.head_sha === after[ref]) {
-              continue;
-            }
-            const commits = await nativeGit.history(fullName, pr.base_sha, after[ref]);
-            const files = await nativeGit.changedFiles(fullName, pr.base_sha, after[ref]);
+            if (pr.state !== "open") continue;
+            const headChanged = pr.head_repo_id === repo.id && pr.head_ref === branchName && pr.head_sha !== after[ref];
+            const baseChanged = pr.base_repo_id === repo.id && pr.base_ref === branchName && pr.base_sha !== after[ref];
+            if (!headChanged && !baseChanged) continue;
+            const headRepo = gh.repos.get(pr.head_repo_id);
+            if (!headRepo) continue;
+            const previousHeadSha = pr.head_sha;
+            const headSha = headChanged ? after[ref]! : pr.head_sha;
+            const baseSha = baseChanged ? after[ref]! : pr.base_sha;
+            const commits = await nativeGit.history(headRepo.full_name, baseSha, headSha);
+            const files = await nativeGit.changedFiles(headRepo.full_name, baseSha, headSha);
+            const mergeable = await nativeGit.canMerge(headRepo.full_name, baseSha, headSha);
             gh.pullRequests.update(pr.id, {
-              head_sha: after[ref]!,
+              ...(headChanged ? { head_sha: headSha } : {}),
+              ...(baseChanged ? { base_sha: baseSha } : {}),
               commits: commits.length,
               additions: files.reduce((sum, file) => sum + file.additions, 0),
               deletions: files.reduce((sum, file) => sum + file.deletions, 0),
               changed_files: files.length,
-              mergeable: null,
-              mergeable_state: "unknown",
+              mergeable,
+              mergeable_state: mergeable ? "clean" : "dirty",
             });
+            if (!headChanged) continue;
             const updated = gh.pullRequests.get(pr.id)!;
             await webhooks.dispatch(
               "pull_request",
@@ -133,7 +142,7 @@ export function smartHttpRoutes(context: RouteContext): void {
               {
                 action: "synchronize",
                 number: pr.number,
-                before: pr.head_sha,
+                before: previousHeadSha,
                 after: after[ref],
                 pull_request: formatPullRequest(updated, gh, baseUrl),
                 repository: formatRepo(repo, gh, baseUrl),

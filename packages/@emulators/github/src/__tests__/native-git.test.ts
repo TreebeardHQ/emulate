@@ -48,6 +48,31 @@ async function makeBundle() {
 }
 
 describe("native Git storage", () => {
+  it("ignores inherited Git config overrides while creating and reading canonical repositories", async () => {
+    const fixture = await makeBundle();
+    const names = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;
+    const original = new Map(names.map((name) => [name, process.env[name]]));
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "core.bare";
+    process.env.GIT_CONFIG_VALUE_0 = "false";
+    const store = createNativeGitStore();
+    try {
+      await store.importBundle("example/project", fixture.bundle, {
+        baseSha: fixture.baseSha,
+        refs: { "refs/heads/main": fixture.baseSha },
+      }, "main");
+      expect(await store.run("example/project", ["config", "--get", "core.bare"])).toBe("true");
+      expect(await store.run("example/project", ["rev-parse", "refs/heads/main"])).toBe(fixture.baseSha);
+    } finally {
+      for (const name of names) {
+        const value = original.get(name);
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await store.close();
+    }
+  });
+
   it("imports only pinned bundle refs and retains native objects and binary contents", async () => {
     const fixture = await makeBundle();
     const store = createNativeGitStore();

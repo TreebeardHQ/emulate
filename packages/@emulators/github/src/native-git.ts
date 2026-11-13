@@ -137,6 +137,33 @@ export class NativeGitStore {
     );
   }
 
+  async hasBranch(fullName: string, branchName: string): Promise<boolean> {
+    return Object.hasOwn(await this.refs(fullName), `refs/heads/${branchName}`);
+  }
+
+  async canMerge(fullName: string, baseSha: string, headSha: string): Promise<boolean> {
+    const gitDir = this.gitDir(fullName);
+    return new Promise<boolean>((resolveMerge, reject) => {
+      const child = spawn("git", ["--git-dir", gitDir, "merge-tree", "--write-tree", baseSha, headSha], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: gitDir,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const stderr: Buffer[] = [];
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolveMerge(true);
+        else if (code === 1) resolveMerge(false);
+        else reject(new Error(Buffer.concat(stderr).toString("utf8").trim() || `git merge-tree exited ${code}`));
+      });
+    });
+  }
+
   async resolve(fullName: string, ref: string): Promise<{ sha: string; type: string }> {
     const sha = (await this.run(fullName, ["rev-parse", "--verify", `${ref}^{object}`])) as string;
     const type = (await this.run(fullName, ["cat-file", "-t", sha])) as string;
@@ -386,11 +413,17 @@ export class NativeGitStore {
   private async git(
     gitDir: string,
     args: string[],
-    options: { encoding?: "utf8" | "buffer"; input?: Uint8Array } = {},
+    options: { encoding?: "utf8" | "buffer" } = {},
   ): Promise<string | Buffer> {
     this.assertOpen();
     try {
       const result = await execFileAsync("git", ["--git-dir", gitDir, ...args], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: gitDir,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
         encoding: options.encoding === "buffer" ? "buffer" : "utf8",
         maxBuffer: 128 * 1024 * 1024,
       });

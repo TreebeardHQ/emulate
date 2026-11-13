@@ -46,7 +46,10 @@ describe("native GitHub service", () => {
           "fixture-token": { login: "fixture-user", scopes: ["repo"] },
           "read-only-token": { login: "fixture-user", scopes: ["contents:read"] },
         },
-        repos: [{ owner: "fixture-user", name: "project", private: true, default_branch: "main", auto_init: false }],
+        repos: [
+          { owner: "fixture-user", name: "project", private: true, default_branch: "main", auto_init: false },
+          { owner: "fixture-user", name: "uninitialized", private: true, default_branch: "main", auto_init: false },
+        ],
       },
     });
     let server: ReturnType<typeof createServer> | undefined;
@@ -63,12 +66,62 @@ describe("native GitHub service", () => {
         new Request(url, { headers: { Authorization: `Basic ${Buffer.from("fixture-user:unknown-token").toString("base64")}` } }),
       );
       expect(unknown.status).toBe(401);
+      const invalidNativeRead = await service.fetch(new Request(
+        "http://localhost/repos/fixture-user/uninitialized/git/ref/heads/main",
+        { headers: { Authorization: "Bearer unknown-token" } },
+      ));
+      expect(invalidNativeRead.status).toBe(401);
+      const invalidNativeWrite = await service.fetch(new Request(
+        "http://localhost/repos/fixture-user/project/contents/file.txt",
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer unknown-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ message: "unauthorized" }),
+        },
+      ));
+      expect(invalidNativeWrite.status).toBe(401);
+      await service.fetch(new Request("http://localhost/repos/fixture-user/project/issues/fixture-token/comments", {
+        method: "POST",
+        headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "fixture-token" }),
+      }));
+      expect(JSON.stringify(service.getGitHubActionLedger())).not.toContain("fixture-token");
       const readOnlyWrite = await service.fetch(
         new Request("http://localhost/fixture-user/project.git/info/refs?service=git-receive-pack", {
           headers: { Authorization: "Bearer read-only-token" },
         }),
       );
       expect(readOnlyWrite.status).toBe(403);
+      const branchesBefore = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/branches", { headers: { Authorization: "Bearer fixture-token" } }),
+      );
+      const branchSnapshot = await branchesBefore.text();
+      const refsBefore = await service.fetch(new Request(url, { headers: { Authorization: "Bearer fixture-token" } }));
+      const nativeRefSnapshot = Buffer.from(await refsBefore.arrayBuffer());
+      const stateBeforeInvalidPrs = service.inspectGitHubState();
+      const missingHead = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/pulls", {
+          method: "POST",
+          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Missing head", head: "does-not-exist", base: "main" }),
+        }),
+      );
+      expect(missingHead.status).toBe(422);
+      const missingBase = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/pulls", {
+          method: "POST",
+          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Missing base", head: "review", base: "does-not-exist" }),
+        }),
+      );
+      expect(missingBase.status).toBe(422);
+      expect(service.inspectGitHubState()).toEqual(stateBeforeInvalidPrs);
+      const branchesAfter = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/branches", { headers: { Authorization: "Bearer fixture-token" } }),
+      );
+      expect(await branchesAfter.text()).toBe(branchSnapshot);
+      const refsAfter = await service.fetch(new Request(url, { headers: { Authorization: "Bearer fixture-token" } }));
+      expect(Buffer.from(await refsAfter.arrayBuffer())).toEqual(nativeRefSnapshot);
       const pullResponse = await service.fetch(
         new Request("http://localhost/repos/fixture-user/project/pulls", {
           method: "POST",
@@ -77,6 +130,20 @@ describe("native GitHub service", () => {
         }),
       );
       expect(pullResponse.status).toBe(201);
+      const stateBeforeRetarget = service.inspectGitHubState();
+      const missingRetarget = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/pulls/1", {
+          method: "PATCH",
+          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ base: "missing-base" }),
+        }),
+      );
+      expect(missingRetarget.status).toBe(422);
+      expect(service.inspectGitHubState()).toEqual(stateBeforeRetarget);
+      const branchListAfterRetarget = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/branches", { headers: { Authorization: "Bearer fixture-token" } }),
+      );
+      expect(await branchListAfterRetarget.text()).toBe(branchSnapshot);
       const diffResponse = await service.fetch(
         new Request("http://localhost/repos/fixture-user/project/pulls/1", {
           headers: { Authorization: "Bearer fixture-token", Accept: "application/vnd.github.v3.diff" },
@@ -162,6 +229,37 @@ describe("native GitHub service", () => {
       expect(await refResponse.json()).toMatchObject({ object: { sha: pushedSha } });
       expect(service.inspectGitHubState().pullRequests[0]?.head.sha).toBe(pushedSha);
       expect(service.inspectGitHubState().reviews[0]?.commit_id).toBe(fixture.headSha);
+      const readMergeState = async () => {
+        const response = await service.fetch(
+          new Request("http://localhost/graphql", {
+            method: "POST",
+            headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: "query MergeGate($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { mergeStateStatus baseRef { branchProtectionRule { requiredApprovingReviewCount } } } } }",
+              variables: { owner: "fixture-user", repo: "project", number: 1 },
+            }),
+          }),
+        );
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      expect(await readMergeState()).toMatchObject({ data: { repository: { pullRequest: { mergeStateStatus: "CLEAN" } } } });
+
+      execFileSync("git", ["-C", clone, "checkout", "main"]);
+      await writeFile(join(clone, "README.md"), "base edit\n");
+      execFileSync("git", ["-C", clone, "add", "."]);
+      execFileSync("git", ["-C", clone, "-c", "user.name=Fixture Author", "-c", "user.email=fixture@example.com", "commit", "-m", "update base"]);
+      await execFileAsync("git", ["-c", `http.extraHeader=Authorization: Basic ${basic}`, "-C", clone, "push", "origin", "HEAD:refs/heads/main"], { timeout: 10000 });
+      expect(await readMergeState()).toMatchObject({ data: { repository: { pullRequest: { mergeStateStatus: "CLEAN" } } } });
+
+      execFileSync("git", ["-C", clone, "checkout", "review"]);
+      await writeFile(join(clone, "README.md"), "head edit\n");
+      execFileSync("git", ["-C", clone, "add", "."]);
+      execFileSync("git", ["-C", clone, "-c", "user.name=Fixture Author", "-c", "user.email=fixture@example.com", "commit", "-m", "conflict with base"]);
+      const conflictedSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      await execFileAsync("git", ["-c", `http.extraHeader=Authorization: Basic ${basic}`, "-C", clone, "push", "origin", "HEAD:refs/heads/review"], { timeout: 10000 });
+      expect(service.inspectGitHubState().pullRequests[0]?.head.sha).toBe(conflictedSha);
+      expect(await readMergeState()).toMatchObject({ data: { repository: { pullRequest: { mergeStateStatus: "DIRTY" } } } });
     } finally {
       if (server?.listening) await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
       await service.close();

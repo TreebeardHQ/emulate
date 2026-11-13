@@ -38,6 +38,7 @@ import { appsRoutes } from "./routes/apps.js";
 import { installationTokenRoutes } from "./routes/installation-tokens.js";
 import { githubGraphqlRoutes } from "./routes/graphql.js";
 import { commitStatusRoutes } from "./routes/statuses.js";
+import { registerNativeGitPolicy } from "./native-policy.js";
 import { findOrCreateBlob, findOrCreateCommit, findOrCreateTree } from "./git-helpers.js";
 
 export { getGitHubStore, type GitHubStore } from "./store.js";
@@ -694,6 +695,8 @@ export const githubPlugin: ServicePlugin = {
 
       return badCredentials(c);
     });
+
+    registerNativeGitPolicy(app, store);
 
     const ctx: RouteContext = { app, store, webhooks, baseUrl, tokenMap };
     usersRoutes(ctx);
