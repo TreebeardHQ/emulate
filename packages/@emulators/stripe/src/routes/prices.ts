@@ -19,6 +19,7 @@ function formatPrice(p: StripePrice) {
     currency: p.currency,
     unit_amount: p.unit_amount,
     type: p.type,
+    recurring: p.type === "recurring" ? { interval: "month", interval_count: 1 } : null,
     active: p.active,
     metadata: p.metadata,
     created: toUnixTimestamp(p.created_at),

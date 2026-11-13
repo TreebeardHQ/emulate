@@ -47,6 +47,7 @@ export interface StripeSeedConfig {
     product_name: string;
     currency: string;
     unit_amount: number;
+    recurring?: { interval: "month" };
   }>;
   webhooks?: Array<{
     url: string;
@@ -130,7 +131,7 @@ export function seedFromConfig(
           product_id: product.stripe_id,
           currency: pr.currency.toLowerCase(),
           unit_amount: pr.unit_amount,
-          type: "one_time",
+          type: pr.recurring ? "recurring" : "one_time",
           active: true,
           metadata: {},
         });

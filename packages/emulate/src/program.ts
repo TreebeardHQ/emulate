@@ -111,6 +111,13 @@ Microsoft OAuth coverage:
 
 Webhook signatures:
   Stripe webhook secrets produce a Stripe-Signature header for raw-body verification.
+  Stripe subscription-mode Checkout creates one active subscription and a paid invoice. Periods are fixed at 30 days; renewals are not simulated.
+  GET /v1/subscriptions supports customer and status=all filters, cursor pagination, and data.latest_invoice and data.items.data.price.product list expansions; retrieval is not paginated.
+  POST /v1/subscriptions/:id schedules cancellation with cancel_at_period_end; DELETE /v1/subscriptions/:id cancels immediately.
+  POST /v1/invoices/:id/pay emits invoice.payment_failed and returns 402 for payment_method=pm_card_chargeDeclined; other methods emit invoice.paid.
+  The billing portal supports schedule-cancel and cancel-now actions, emitting customer.subscription.updated and customer.subscription.deleted.
+  Subscription Checkout Idempotency-Key replay returns the original result; reuse with a different request returns a conflict.
+  Subscription and invoice events, plus checkout.session.completed, use standard Stripe event envelopes; legacy customer and product events keep their existing envelope.
   Slack signing_secret produces X-Slack-Request-Timestamp and X-Slack-Signature for outbound event callbacks.
   The Slack signature covers v0:<timestamp>:<raw-body>; configure the receiver with the same secret.
   Slack callbacks are unsigned when signing_secret is absent or empty.

@@ -9,7 +9,9 @@ export function subscriptionRoutes({ app, store, webhooks }: RouteContext): void
     const customer = c.req.query("customer");
     const status = c.req.query("status") ?? "active";
     const expand = parseExpand(c).map((path) => path.replace(/^data\./, ""));
-    const items = ss.subscriptions.all().filter((sub) => (!customer || sub.customer_id === customer) && (status === "all" || sub.status === status));
+    const items = ss.subscriptions
+      .all()
+      .filter((sub) => (!customer || sub.customer_id === customer) && (status === "all" || sub.status === status));
     return stripeList(c, items, "/v1/subscriptions", (sub) => formatSubscription(sub, ss, expand));
   });
   app.get("/v1/subscriptions/:id", (c) => {
@@ -25,7 +27,9 @@ export function subscriptionRoutes({ app, store, webhooks }: RouteContext): void
       if (![true, false, "true", "false"].includes(body.cancel_at_period_end as boolean | string)) {
         return stripeError(c, 400, "invalid_request_error", "cancel_at_period_end must be a boolean");
       }
-      ss.subscriptions.update(sub.id, { cancel_at_period_end: body.cancel_at_period_end === true || body.cancel_at_period_end === "true" });
+      ss.subscriptions.update(sub.id, {
+        cancel_at_period_end: body.cancel_at_period_end === true || body.cancel_at_period_end === "true",
+      });
     }
     const updated = ss.subscriptions.findOneBy("stripe_id", sub.stripe_id)!;
     await dispatchStripeEvent(webhooks, "customer.subscription.updated", formatSubscription(updated, ss));

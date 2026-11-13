@@ -2,7 +2,7 @@
 title: "Stripe"
 ---
 
-Stripe API emulation with customers, payment methods, customer sessions, payment intents, charges, products, prices, and checkout sessions. Includes a hosted checkout page and webhook delivery.
+Stripe API emulation with customers, payment methods, customer sessions, payment intents, charges, products, prices, checkout sessions, subscriptions, and invoices. Hosted Checkout and the billing portal support local payment and subscription flows. This is a limited emulator: subscription periods are fixed at 30 days, and no renewal engine advances them or creates renewal invoices.
 
 API keys are accepted without checks by default. Set `stripe.strict_scopes: true` in seed config to require a known key on `/v1` routes: a key from the top-level `tokens` config, or one listed in `stripe.api_keys`. The Next.js and Nuxt adapters don't read top-level `tokens`, so there strict mode accepts only `stripe.api_keys`. Send the key as the HTTP Basic username or a bearer token: a request without a key returns `401` with `You did not provide an API key.` and an unknown key returns `401` with `Invalid API Key provided`, both as `invalid_request_error`. Hosted checkout pages stay public.
 
@@ -54,8 +54,37 @@ API keys are accepted without checks by default. Set `stripe.strict_scopes: true
 - `GET /v1/checkout/sessions/:id` — retrieve session
 - `POST /v1/checkout/sessions/:id/expire` — expire session
 - `GET /v1/checkout/sessions` — list sessions (filter by `customer`, `status`, `payment_status`)
+- Checkout creation accepts `Idempotency-Key`; matching requests replay the original result, while reusing a key with a different request returns a conflict
 - `GET /checkout/:id` — hosted checkout page (HTML)
 - `POST /checkout/:id/complete` — complete payment flow
+
+For `mode=subscription`, completing Checkout creates one active subscription and a paid invoice. The subscription period is 30 days. The emulator does not process renewals.
+
+## Subscriptions
+
+- `GET /v1/subscriptions` — list subscriptions with optional `customer` and `status` filters; `status=all` includes every status
+- `GET /v1/subscriptions/:id` — retrieve a subscription
+
+List requests support Stripe cursor pagination. For list expansions, use `expand[]=data.latest_invoice` or `expand[]=data.items.data.price.product`. Retrieve requests are not paginated and use `expand[]=latest_invoice` or `expand[]=items.data.price.product`.
+
+- `POST /v1/subscriptions/:id` — update `cancel_at_period_end`; setting it to `true` schedules cancellation
+- `DELETE /v1/subscriptions/:id` — cancel a subscription immediately
+
+These actions emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
+
+## Invoices
+
+- `POST /v1/invoices/:id/pay` — pay an invoice
+
+Passing `payment_method=pm_card_chargeDeclined` leaves the invoice open, emits `invoice.payment_failed`, and returns HTTP `402`. Other payment methods mark it paid and emit `invoice.paid`.
+
+## Billing portal
+
+- `POST /v1/billing_portal/sessions` — create a hosted portal session
+
+The portal can schedule cancellation at period end, which updates the subscription, or cancel immediately, which deletes it. These actions emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
+
+Subscription and invoice events, plus `checkout.session.completed`, use standard Stripe event envelopes. Supported event types include `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, and `invoice.payment_failed`. Legacy customer and product events retain their existing envelope.
 
 ## Webhooks
 
@@ -64,3 +93,5 @@ Events are delivered to configured webhook URLs:
 - Webhooks configured with a secret include `Stripe-Signature: t=<timestamp>,v1=<signature>`, signed over `<timestamp>.<raw body>`
 - `checkout.session.completed` — when a checkout session is completed
 - `checkout.session.expired` — when a checkout session expires
+- `customer.subscription.created`, `customer.subscription.updated`, and `customer.subscription.deleted` — subscription lifecycle changes
+- `invoice.paid` and `invoice.payment_failed` — invoice payment events

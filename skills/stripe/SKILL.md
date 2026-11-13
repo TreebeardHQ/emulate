@@ -6,7 +6,7 @@ allowed-tools: Bash(npx emulate:*), Bash(curl:*)
 
 # Stripe API Emulator
 
-Fully stateful Stripe API emulation. Customers, products, prices, checkout sessions, payment intents, charges, and payment methods persist in memory. Webhooks fire on state changes. The hosted checkout UI lets you complete payments in the browser.
+Stripe API emulation for local development. Customers, products, prices, checkout sessions, subscriptions, invoices, payment intents, charges, and payment methods persist in memory. Subscription, invoice, and completed Checkout webhooks use standard Stripe event envelopes. Hosted checkout lets you complete payment or subscription sessions in the browser.
 
 No real payments are processed. Every Stripe SDK call hits the emulator and produces realistic responses.
 
@@ -241,6 +241,24 @@ curl -X POST http://localhost:4000/v1/checkout/sessions/cs_xxx/expire
 
 The session's `url` field points to a hosted checkout page at `/checkout/cs_xxx`. Clicking "Pay" on that page completes the session, fires the `checkout.session.completed` webhook, and redirects to `success_url`. The `{CHECKOUT_SESSION_ID}` template in `success_url` is replaced with the actual session ID.
 
+For subscriptions, create the session with `mode=subscription` and recurring price IDs. Completing the hosted session creates one active subscription and one paid invoice, then sends `customer.subscription.created` and `invoice.paid` events alongside `checkout.session.completed`. The subscription period is fixed at 30 days. The emulator does not advance periods or generate renewal invoices. If the create request includes `Idempotency-Key`, replaying the same request returns its original result; reusing that key with a different request returns a conflict.
+
+### Subscriptions
+
+`GET /v1/subscriptions` lists subscriptions and accepts `customer`, `status`, and Stripe cursor parameters such as `starting_after` and `ending_before`. Set `status=all` to include every status. For list responses, use `expand[]=data.latest_invoice` or `expand[]=data.items.data.price.product` to include related objects. `GET /v1/subscriptions/:id` retrieves one subscription without pagination. Retrieve expansions use `expand[]=latest_invoice` or `expand[]=items.data.price.product`.
+
+Use `POST /v1/subscriptions/:id` with `cancel_at_period_end=true` to schedule cancellation, or `DELETE /v1/subscriptions/:id` to cancel immediately. These requests emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
+
+Pay an invoice with `POST /v1/invoices/:id/pay`. Passing `payment_method=pm_card_chargeDeclined` leaves the invoice open, emits `invoice.payment_failed`, and returns HTTP 402. Other payment methods mark the invoice paid and emit `invoice.paid`.
+
+```bash
+curl "http://localhost:4000/v1/subscriptions?customer=cus_xxx&status=all&limit=10&expand[]=data.latest_invoice&expand[]=data.items.data.price.product"
+```
+
+### Billing portal
+
+Create a hosted portal session with `POST /v1/billing_portal/sessions`, passing the customer and return URL. The portal offers schedule-cancel, which updates the subscription to cancel at the end of its current period, and cancel-now, which cancels it immediately. These actions emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
+
 ### Payment Intents
 
 ```bash
@@ -312,6 +330,13 @@ Webhooks configured with a `secret` include `Stripe-Signature: t=<timestamp>,v1=
 | `charge.succeeded` | Payment intent confirmed (charge auto-created) |
 | `checkout.session.completed` | Checkout completed via hosted page |
 | `checkout.session.expired` | Checkout session expired |
+| `customer.subscription.created` | Subscription created by completed subscription-mode Checkout |
+| `customer.subscription.updated` | Portal schedules cancellation at period end |
+| `customer.subscription.deleted` | Portal cancels a subscription immediately |
+| `invoice.paid` | Paid invoice created for completed subscription-mode Checkout |
+| `invoice.payment_failed` | Invoice payment failure |
+
+Subscription and invoice events, plus `checkout.session.completed`, use standard Stripe event envelopes with `id`, `object: "event"`, `type`, `api_version`, `created`, `livemode`, and `data.object`. Other legacy customer and product events retain their existing envelope. The emulator models the listed subscription and billing flows; it does not simulate recurring renewals.
 
 ### Webhook handler example
 

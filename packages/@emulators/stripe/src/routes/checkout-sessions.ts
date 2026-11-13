@@ -11,11 +11,14 @@ const SERVICE_LABEL = "Stripe";
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
   }
   return value;
 }
-
 
 function formatSession(s: StripeCheckoutSession, baseUrl: string) {
   return {
@@ -47,7 +50,14 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
     const params = JSON.stringify(canonical(body));
     const replay = key ? replays.get(scope) : undefined;
     if (replay) {
-      if (replay.params !== params) return stripeError(c, 400, "invalid_request_error", "Idempotency-Key was reused with different parameters.", "idempotency_key_in_use");
+      if (replay.params !== params)
+        return stripeError(
+          c,
+          400,
+          "invalid_request_error",
+          "Idempotency-Key was reused with different parameters.",
+          "idempotency_key_in_use",
+        );
       return c.json(replay.response);
     }
     if (!body.mode)
@@ -128,7 +138,8 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       success_url: (body.success_url as string) ?? null,
       cancel_url: (body.cancel_url as string) ?? null,
       line_items: lineItems,
-      subscription_metadata: (body.subscription_data as { metadata?: Record<string, string> } | undefined)?.metadata ?? {},
+      subscription_metadata:
+        (body.subscription_data as { metadata?: Record<string, string> } | undefined)?.metadata ?? {},
       metadata: (body.metadata as Record<string, string>) ?? {},
     });
     const response = formatSession(session, baseUrl);
@@ -253,11 +264,13 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
     }
 
     ss.checkoutSessions.update(session.id, { status: "complete", payment_status: "paid" });
-    const subscription = session.mode === "subscription"
-      ? await completeSubscription({ app, store, webhooks, baseUrl }, session)
-      : undefined;
+    const subscription =
+      session.mode === "subscription"
+        ? await completeSubscription({ app, store, webhooks, baseUrl }, session)
+        : undefined;
     const updated = ss.checkoutSessions.update(session.id, {
-      status: "complete", payment_status: "paid",
+      status: "complete",
+      payment_status: "paid",
       ...(subscription ? { subscription_id: subscription.stripe_id } : {}),
     })!;
 
