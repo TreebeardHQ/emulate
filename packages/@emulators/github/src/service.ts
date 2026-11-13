@@ -9,6 +9,7 @@ import type { NativeGitPins } from "./native-git.js";
 import { projectNativeGit } from "./native-projection.js";
 import { registerNativeGitPolicy } from "./native-policy.js";
 import { smartHttpRoutes } from "./routes/smart-http.js";
+import { getRevokedTokens } from "./tokens.js";
 
 export interface GitHubServiceOptions {
   baseUrl?: string;
@@ -106,13 +107,13 @@ function actionFacts(value: unknown, secrets: readonly string[] = []): Record<st
   return Object.keys(result).length ? result : undefined;
 }
 
-function redact(value: unknown, secrets: readonly string[]): unknown {
+function redact<T>(value: T, secrets: readonly string[]): T {
   if (typeof value === "string") {
-    return secrets.reduce((text, secret) => secret ? text.split(secret).join("[REDACTED]") : text, value);
+    return secrets.reduce((text, secret) => secret ? text.split(secret).join("[REDACTED]") : text, value) as T;
   }
-  if (Array.isArray(value)) return value.map((entry) => redact(entry, secrets));
+  if (Array.isArray(value)) return value.map((entry) => redact(entry, secrets)) as T;
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redact(entry, secrets)]));
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redact(entry, secrets)])) as T;
   }
   return value;
 }
@@ -121,10 +122,10 @@ function knownSecrets(store: ReturnType<typeof createServer>["store"], tokens: T
   const gh = getGitHubStore(store);
   return [
     ...tokens.keys(),
+    ...getRevokedTokens(store),
     ...gh.apps.all().flatMap((app) => [app.private_key, app.webhook_secret ?? ""]),
     ...gh.oauthApps.all().map((app) => app.client_secret),
-    ...gh.secrets.all().map((secret) => secret.value),
-    ...gh.webhooks.all().map((hook) => hook.secret ?? ""),
+    ...gh.webhooks.all().map((hook) => hook.config.secret ?? ""),
   ].filter((secret) => secret.length > 0);
 }
 
@@ -232,32 +233,26 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
   let sequence = 0;
   const actions: GitHubServiceAction[] = [];
   const importedRepos = new Set<string>();
-  const seenDeliveries = new Set<number>();
   const secretValues = () => knownSecrets(githubServer.store, githubServer.tokenMap);
   let requestQueue = Promise.resolve();
-  const appendDeliveries = () => {
-    for (const delivery of githubServer.webhooks.getDeliveries()) {
-      if (seenDeliveries.has(delivery.id) || delivery.duration === null) continue;
-      seenDeliveries.add(delivery.id);
-      const payload = delivery.payload && typeof delivery.payload === "object"
-        ? delivery.payload as Record<string, unknown>
-        : {};
-      const action = {
-        sequence: ++sequence,
-        deliverySequence: delivery.id,
-        type: "webhook" as const,
-        event: delivery.event,
-        action: delivery.action,
-        deliveryId: delivery.delivery_id,
-        redeliveryOf: delivery.redelivery_of,
-        successful: delivery.success,
-        status: delivery.status_code ?? undefined,
-        before: typeof payload.before === "string" ? redact(payload.before, secretValues()) as string : undefined,
-        after: typeof payload.after === "string" ? redact(payload.after, secretValues()) as string : undefined,
-      };
-      actions.push(action);
-    }
-  };
+  const stopObservingDeliveries = githubServer.webhooks.observeDeliveries((delivery) => {
+    const payload = delivery.payload && typeof delivery.payload === "object"
+      ? delivery.payload as Record<string, unknown>
+      : {};
+    actions.push({
+      sequence: ++sequence,
+      deliverySequence: delivery.id,
+      type: "webhook",
+      event: delivery.event,
+      action: delivery.action,
+      deliveryId: delivery.delivery_id,
+      redeliveryOf: delivery.redelivery_of,
+      successful: delivery.success,
+      status: delivery.status_code ?? undefined,
+      before: typeof payload.before === "string" ? redact(payload.before, secretValues()) as string : undefined,
+      after: typeof payload.after === "string" ? redact(payload.after, secretValues()) as string : undefined,
+    });
+  });
   const fetch = async (request: Request): Promise<Response> => {
     let release!: () => void;
     const previous = requestQueue;
@@ -317,7 +312,6 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       });
       actions.push(requestAction!);
     }
-    appendDeliveries();
     return response;
   };
   return {
@@ -345,7 +339,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       importedRepos.add(repoFullName);
     },
     inspectGitHubState() {
-      return structuredClone(snapshot(githubServer.store));
+      return redact(structuredClone(snapshot(githubServer.store)), secretValues());
     },
     getGitHubActionLedger() {
       return structuredClone(actions).sort((a, b) => a.sequence - b.sequence);
@@ -353,7 +347,6 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
     async replayDelivery(deliveryId) {
       const delivery = await githubServer.webhooks.redeliver(deliveryId);
       if (!delivery) return undefined;
-      appendDeliveries();
       return {
         id: delivery.id,
         delivery_id: delivery.delivery_id,
@@ -367,6 +360,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       };
     },
     async close() {
+      stopObservingDeliveries();
       await nativeGit.close();
     },
   };

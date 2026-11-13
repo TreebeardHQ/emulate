@@ -7,6 +7,8 @@ const service = () => createGitHubService({
     users: [{ login: "fixture-user" }],
     tokens: { "ghp_fixture_token": { login: "fixture-user", scopes: ["repo", "admin:repo_hook"] } },
     repos: [{ owner: "fixture-user", name: "project" }],
+    apps: [{ app_id: 42, slug: "review-bot", name: "Review Bot", private_key: "app_private_fixture", webhook_secret: "app_webhook_fixture" }],
+    oauth_apps: [{ client_id: "fixture-client", client_secret: "oauth_secret_fixture", name: "Fixture OAuth", redirect_uris: [] }],
   },
 });
 
@@ -59,6 +61,60 @@ describe("GitHub service action ledger", () => {
       const replay = await github.replayDelivery(webhook!.deliverySequence!);
       expect(replay).toMatchObject({ redelivery_of: webhook!.deliverySequence, delivery_id: webhook!.deliveryId, success: false });
       expect(github.getGitHubActionLedger().filter((entry) => entry.type === "webhook")).toHaveLength(2);
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+      await github.close();
+    }
+  });
+
+  it("redacts secrets from persisted snapshot text and returns detached nested evidence", async () => {
+    const github = service();
+    const originalFetch = globalThis.fetch;
+    try {
+      vi.stubGlobal("fetch", async () => new Response(null, { status: 200 }));
+      const issue = await github.fetch(new Request(`${base}/repos/fixture-user/project/issues`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ title: "Fixture issue" }),
+      }));
+      expect(issue.status).toBe(201);
+      const hook = await github.fetch(new Request(`${base}/repos/fixture-user/project/hooks`, {
+        method: "POST", headers: jsonHeaders,
+        body: JSON.stringify({ name: "web", active: true, events: ["issues"], config: { url: "https://hooks.example.test", secret: "hook_secret_fixture" } }),
+      }));
+      expect(hook.status).toBe(201);
+      const callback = await github.fetch(new Request(`${base}/login/oauth/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ login: "fixture-user", client_id: "fixture-client", redirect_uri: "https://example.test/callback", scope: "repo" }),
+      }));
+      const code = new URL(callback.headers.get("location") ?? "https://example.test/").searchParams.get("code") ?? "";
+      const exchange = await github.fetch(new Request(`${base}/login/oauth/access_token`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ client_id: "fixture-client", client_secret: "oauth_secret_fixture", code, redirect_uri: "https://example.test/callback" }),
+      }));
+      const accessToken = (await exchange.json() as { access_token: string }).access_token;
+      const credentials = Buffer.from("fixture-client:oauth_secret_fixture").toString("base64");
+      const revoke = await github.fetch(new Request(`${base}/applications/fixture-client/token`, {
+        method: "DELETE", headers: { Authorization: `Basic ${credentials}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: accessToken }),
+      }));
+      expect(revoke.status).toBe(204);
+      const body = [
+        "ghp_fixture_token", "app_private_fixture", "app_webhook_fixture",
+        "oauth_secret_fixture", "hook_secret_fixture", accessToken,
+      ].join(" ");
+      const comment = await github.fetch(new Request(`${base}/repos/fixture-user/project/issues/1/comments`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ body }),
+      }));
+      expect(comment.status).toBe(201);
+      const state = github.inspectGitHubState();
+      const stateText = JSON.stringify(state);
+      for (const secret of [
+        "ghp_fixture_token", "app_private_fixture", "app_webhook_fixture",
+        "oauth_secret_fixture", "hook_secret_fixture", accessToken,
+      ]) expect(stateText).not.toContain(secret);
+      expect(state.comments[0]?.body).toContain("[REDACTED]");
+      state.comments[0]!.body = "tampered";
+      expect(github.inspectGitHubState().comments[0]?.body).not.toBe("tampered");
     } finally {
       vi.stubGlobal("fetch", originalFetch);
       await github.close();
