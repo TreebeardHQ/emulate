@@ -62,6 +62,10 @@ GitHub API coverage:
   Includes repository contents, raw downloads, raw media negotiation for file Contents and README responses,
   commit history, commit details, ref comparisons, organization membership seeding with member/admin roles,
   and Checks list-by-ref endpoints for branch and tag refs containing slashes.
+  The native GitHub service imports pinned bundles and serves authenticated smart HTTP clone, fetch, and push.
+  Pushes update REST Git projections and open pull request heads before dispatching synchronization webhooks.
+  Native REST Git reads use the imported repository; Git object and ref writes through REST return 501.
+  Review support includes native diff anchors, statuses, branch protection reads, and a focused merge-gate GraphQL query.
   Check-run lists paginate with page/per_page (default 30, maximum 100) and Link headers.
   Ref lists filter before pagination; total_count includes all filtered runs.
   Checks retain the authenticated installation's App in API responses and webhooks.

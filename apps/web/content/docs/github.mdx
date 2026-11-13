@@ -40,6 +40,23 @@ The Next.js and Nuxt adapters also generate omitted keys. Their returned server 
 
 Expiry is informational and does not change authorization behavior. `createEmulator().reset()` clears minted installation-specific authorization and metadata while preserving seeded tokens, generated App keys, and existing fallback-token behavior. Persisted Next.js and Nuxt adapters restore the metadata with their private snapshot.
 
+## Native Git service
+
+`createGitHubService()` uses native Git as the canonical object and ref store. Import a pinned bundle for a seeded repository before using its Git routes. `importFixture(repoFullName, bundleBytes, pins)` verifies the base commit and each pinned ref, then publishes only the refs in `pins.refs`. Bundles may carry extra Git objects, but clone and ref listing expose only the pinned refs. Git must be installed on the host running the service.
+
+```typescript
+const service = createGitHubService({ seed })
+await service.importFixture('my-org/org-repo', bundleBytes, {
+  baseSha: '0123456789abcdef0123456789abcdef01234567',
+  refs: {
+    'refs/heads/main': '0123456789abcdef0123456789abcdef01234567',
+    'refs/heads/review': '89abcdef0123456789abcdef0123456789abcdef',
+  },
+})
+```
+
+The service accepts authenticated Git smart HTTP clone, fetch, and push requests at `/<owner>/<repo>.git`. A successful push updates native refs and the REST branch, commit, tree, contents, and pull request projections before returning. It dispatches push and pull request synchronize webhooks. REST reads for Git objects, refs, commit history and diffs, and pull request files and commits use the same native repository. REST writes to Git objects or refs return `501`; use smart HTTP push for repository writes. Native Git routes return `503` until the bundle is imported. Statuses, branch protection reads, line-anchored pull request reviews and replies, and the merge-gate GraphQL query are supported. GraphQL supports that query shape, not the full GitHub GraphQL API.
+
 Installation access tokens act as the configured GitHub App bot for repository writes. Repository ownership, selected repository access, and requested App permissions remain enforced. Pull request merges require `contents: write` on the base repository. Pull request branch updates require `pull_requests: write` on the pull request repository and `contents: write` on the head repository.
 
 The CLI can generate omitted keys when you request a private delivery file:

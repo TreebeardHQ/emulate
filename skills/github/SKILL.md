@@ -307,6 +307,23 @@ curl http://localhost:4001/repos/octocat/hello-world/commits/main
 curl http://localhost:4001/repos/octocat/hello-world/compare/v1.0.0...main
 ```
 
+### Native Git service
+
+`createGitHubService()` uses native Git as the canonical object and ref store. Import a pinned bundle for a seeded repository before using its Git routes. `importFixture(repoFullName, bundleBytes, pins)` verifies the pinned base commit and refs, then publishes only those refs. A bundle may contain other objects, but clients cannot discover refs outside the pin map. Install Git on the host that runs the service.
+
+```typescript
+const service = createGitHubService({ seed })
+await service.importFixture('my-org/org-repo', bundleBytes, {
+  baseSha: '0123456789abcdef0123456789abcdef01234567',
+  refs: {
+    'refs/heads/main': '0123456789abcdef0123456789abcdef01234567',
+    'refs/heads/review': '89abcdef0123456789abcdef0123456789abcdef',
+  },
+})
+```
+
+Smart HTTP supports authenticated clone, fetch, and push at `/<owner>/<repo>.git`. A successful push updates branch, commit, tree, contents, and open pull request projections before returning, then dispatches push and pull request synchronize webhooks. REST reads for refs, trees, blobs, contents, commit history and diffs, and pull request files and commits read those same Git objects. REST writes to Git objects or refs return `501`; use smart HTTP push to keep Git and REST state coherent. Native Git endpoints return `503` until the bundle is imported. This service also supports commit statuses, branch protection reads, the merge-gate GraphQL query, and line-anchored pull request reviews and replies. Its GraphQL support implements that merge-gate query shape rather than general GitHub GraphQL.
+
 ### Issues
 
 ```bash
