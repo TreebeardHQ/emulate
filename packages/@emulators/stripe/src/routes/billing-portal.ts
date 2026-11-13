@@ -60,7 +60,8 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
   app.post("/portal/:id/cancel", async (c) => {
     const portal = portals.findOneBy("stripe_id", c.req.param("id"));
     if (!portal) return c.notFound();
-    const body = await parseStripeBody(c);
+    const fields = new URLSearchParams(await c.req.text());
+    const body = { subscription: fields.get("subscription"), action: fields.get("action") };
     const sub =
       typeof body.subscription === "string" ? ss.subscriptions.findOneBy("stripe_id", body.subscription) : undefined;
     if (!sub || sub.customer_id !== portal.customer) return c.notFound();

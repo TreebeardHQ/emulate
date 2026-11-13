@@ -96,7 +96,7 @@ export async function completeSubscription(
     current_period_start: start,
     current_period_end: start + 30 * 24 * 60 * 60,
     items: session.line_items.map((item) => ({ id: stripeId("si"), ...item })),
-    metadata: session.subscription_metadata ?? {},
+    metadata: session.subscription_metadata,
     latest_invoice: stripeId("in"),
   });
   const invoice = ss.invoices.insert({

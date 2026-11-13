@@ -65,7 +65,7 @@ export interface StripeCheckoutSession extends Entity {
   success_url: string | null;
   cancel_url: string | null;
   subscription_id?: string;
-  subscription_metadata?: Record<string, string>;
+  subscription_metadata: Record<string, string>;
   line_items: Array<{ price: string; quantity: number }>;
   metadata: Record<string, string>;
 }

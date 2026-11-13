@@ -49,7 +49,7 @@ export function subscriptionRoutes({ app, store, webhooks }: RouteContext): void
     const failed = body.payment_method === "pm_card_chargeDeclined";
     const updated = ss.invoices.update(invoice.id, { status: failed ? "open" : "paid" })!;
     const sub = ss.subscriptions.findOneBy("stripe_id", invoice.subscription_id)!;
-    ss.subscriptions.update(sub.id, { status: failed ? "past_due" : "active" });
+    if (sub.status !== "canceled") ss.subscriptions.update(sub.id, { status: failed ? "past_due" : "active" });
     await dispatchStripeEvent(webhooks, failed ? "invoice.payment_failed" : "invoice.paid", formatInvoice(updated));
     if (failed) return stripeError(c, 402, "card_error", "Your card was declined.", "card_declined");
     return c.json(formatInvoice(updated));

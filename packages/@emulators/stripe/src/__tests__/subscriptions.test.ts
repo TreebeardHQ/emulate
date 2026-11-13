@@ -216,3 +216,59 @@ describe("Checkout idempotency", () => {
     expect(sessions.data).toHaveLength(1);
   });
 });
+
+describe("public portal form safety", () => {
+  it("does not traverse prototype properties in form field names", async () => {
+    const { app } = setup();
+    const res = await app.request("/v1/billing_portal/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customer: "cus_acme", return_url: "https://app.example.com" }),
+    });
+    const portal = await res.json();
+    try {
+      const response = await app.request(`/portal/${portal.id}/cancel`, {
+        method: "POST",
+        body: new URLSearchParams({ "__proto__[stripePrototypeProbe]": "yes" }),
+      });
+      expect(response.status).toBe(404);
+      expect(Object.hasOwn(Object.prototype, "stripePrototypeProbe")).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "stripePrototypeProbe");
+    }
+  });
+});
+
+describe("subscription reset and terminal state", () => {
+  it("does not replay a removed Checkout session after the upstream store resets", async () => {
+    const { app, store } = setup();
+    const first = await checkout(app, { "Idempotency-Key": "reset-acme" });
+    store.reset();
+    seedFromConfig(store, base, {
+      customers: [{ id: "cus_acme" }],
+      products: [{ name: "Starter" }],
+      prices: [{ id: "price_starter", product_name: "Starter", currency: "usd", unit_amount: 10000 }],
+    });
+    const second = await checkout(app, { "Idempotency-Key": "reset-acme" });
+    expect(second.id).not.toBe(first.id);
+    expect((await app.request(`/v1/checkout/sessions/${second.id}`)).status).toBe(200);
+  });
+
+  it("keeps canceled subscriptions canceled when an invoice is paid or fails", async () => {
+    const { app } = setup();
+    const session = await checkout(app);
+    await app.request(`/checkout/${session.id}/complete`, { method: "POST" });
+    const {
+      data: [sub],
+    } = await (await app.request("/v1/subscriptions?status=all")).json();
+    await app.request(`/v1/subscriptions/${sub.id}`, { method: "DELETE" });
+    for (const body of [{}, { payment_method: "pm_card_chargeDeclined" }]) {
+      await app.request(`/v1/invoices/${sub.latest_invoice}/pay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect((await (await app.request(`/v1/subscriptions/${sub.id}`)).json()).status).toBe("canceled");
+    }
+  });
+});

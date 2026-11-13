@@ -1,4 +1,4 @@
-import type { RouteContext } from "@emulators/core";
+import type { Entity, RouteContext } from "@emulators/core";
 import { renderCardPage, renderCheckoutPage, escapeHtml, escapeAttr } from "@emulators/core";
 import type { CheckoutLineItem } from "@emulators/core";
 import { getStripeStore } from "../store.js";
@@ -41,14 +41,19 @@ function formatSession(s: StripeCheckoutSession, baseUrl: string) {
 export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteContext): void {
   const ss = getStripeStore(store);
 
-  const replays = new Map<string, { params: string; response: ReturnType<typeof formatSession> }>();
+  interface CheckoutReplay extends Entity {
+    scope: string;
+    params: string;
+    response: ReturnType<typeof formatSession>;
+  }
+  const replays = store.collection<CheckoutReplay>("stripe.checkout_replays", ["scope"]);
 
   app.post("/v1/checkout/sessions", async (c) => {
     const body = await parseStripeBody(c);
     const key = c.req.header("Idempotency-Key");
     const scope = JSON.stringify([stripeRequestKey(c.req.header("Authorization")), key]);
     const params = JSON.stringify(canonical(body));
-    const replay = key ? replays.get(scope) : undefined;
+    const replay = key ? replays.findOneBy("scope", scope) : undefined;
     if (replay) {
       if (replay.params !== params)
         return stripeError(
@@ -143,7 +148,7 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       metadata: (body.metadata as Record<string, string>) ?? {},
     });
     const response = formatSession(session, baseUrl);
-    if (key) replays.set(scope, { params, response });
+    if (key) replays.insert({ scope, params, response });
     return c.json(response, 200);
   });
 
