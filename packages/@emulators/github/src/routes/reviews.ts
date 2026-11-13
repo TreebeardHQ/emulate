@@ -16,6 +16,7 @@ import {
   timestamp,
 } from "../helpers.js";
 import { assertRepoPermission, assertRepoWrite, notFoundResponse, ownerLoginOf } from "../route-helpers.js";
+import { getNativeGitStore } from "../native-git.js";
 
 function findPull(gh: GitHubStore, repoId: number, pullNumber: number): GitHubPullRequest | undefined {
   return gh.pullRequests.findBy("repo_id", repoId).find((p) => p.number === pullNumber);
@@ -75,7 +76,7 @@ function eventToState(event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"): GitHubR
   }
 }
 
-function dispatchReviewWebhook(
+async function dispatchReviewWebhook(
   webhooks: WebhookDispatcher,
   gh: GitHubStore,
   repo: GitHubRepo,
@@ -84,11 +85,11 @@ function dispatchReviewWebhook(
   actor: GitHubUser,
   baseUrl: string,
   action: "submitted" | "dismissed",
-) {
+): Promise<void> {
   const ownerLogin = ownerLoginOf(gh, repo);
   const reviewFmt = formatReview(review, gh, baseUrl);
   if (!reviewFmt) return;
-  webhooks.dispatch(
+  await webhooks.dispatch(
     "pull_request_review",
     action,
     {
@@ -154,14 +155,69 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
       throw new ApiError(422, "Validation failed");
     }
     const event = hasEvent ? parseSubmitEvent(eventRaw) : undefined;
+    if (event && event !== "COMMENT" && actor.id === pr.user_id) {
+      throw new ApiError(422, "You cannot approve or request changes on your own pull request.");
+    }
 
     let bodyText: string | null = null;
     if (typeof raw.body === "string") bodyText = raw.body;
     else if (raw.body === null || raw.body === undefined) bodyText = null;
     else throw new ApiError(422, "Validation failed");
 
+    const nativeGit = store.getData<boolean>("github.native_git") === true ? getNativeGitStore(store) : undefined;
+    if (nativeGit && !nativeGit.hasRepo(repo.full_name)) {
+      throw new ApiError(503, "Native Git repository is not initialized");
+    }
+    if (nativeGit && raw.commit_id !== undefined && raw.commit_id !== null && typeof raw.commit_id !== "string") {
+      throw new ApiError(422, "Validation failed");
+    }
     const commitId =
       typeof raw.commit_id === "string" && raw.commit_id.trim() ? raw.commit_id.trim() : pr.head_sha || generateSha();
+    if (nativeGit) {
+      if (!/^[0-9a-f]{40,64}$/i.test(commitId) || !/^[0-9a-f]{40,64}$/i.test(pr.base_sha)) {
+        throw new ApiError(422, "Validation failed");
+      }
+      try {
+        if ((await nativeGit.resolve(repo.full_name, commitId)).type !== "commit") throw new ApiError(422, "Validation failed");
+        if ((await nativeGit.resolve(repo.full_name, pr.base_sha)).type !== "commit") throw new ApiError(422, "Validation failed");
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(422, "Validation failed");
+      }
+    }
+
+    const rawComments = raw.comments;
+    if (rawComments !== undefined && !Array.isArray(rawComments)) throw new ApiError(422, "Validation failed");
+    const comments = (rawComments ?? []) as unknown[];
+    const commentDrafts: Array<{
+      body: string;
+      path: string;
+      position: number | null;
+      line: number | null;
+      side: "LEFT" | "RIGHT" | null;
+    }> = [];
+    for (const entry of comments) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new ApiError(422, "Validation failed");
+      const o = entry as Record<string, unknown>;
+      if (typeof o.path !== "string" || !o.path.trim() || typeof o.body !== "string") {
+        throw new ApiError(422, "Validation failed");
+      }
+      if (nativeGit) {
+        const line = o.line;
+        const side = o.side;
+        if (typeof line !== "number" || !Number.isSafeInteger(line) || line < 1 || (side !== "LEFT" && side !== "RIGHT")) {
+          throw new ApiError(422, "Validation failed");
+        }
+        if (!(await nativeGit.hasDiffAnchor(repo.full_name, pr.base_sha, commitId, o.path, line, side))) {
+          throw new ApiError(422, "Validation failed");
+        }
+        commentDrafts.push({ body: o.body, path: o.path, position: null, line, side });
+      } else {
+        const position = typeof o.position === "number" && Number.isFinite(o.position) ? o.position : parseInt(String(o.position), 10);
+        if (!Number.isFinite(position)) throw new ApiError(422, "Validation failed");
+        commentDrafts.push({ body: o.body, path: o.path, position, line: null, side: "RIGHT" });
+      }
+    }
 
     const state: GitHubReview["state"] = event ? eventToState(event) : "PENDING";
     const submittedAt = event ? timestamp() : null;
@@ -179,29 +235,20 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     gh.reviews.update(row.id, { node_id: generateNodeId("PullRequestReview", row.id) });
     const review = gh.reviews.get(row.id)!;
 
-    const commentsArr = Array.isArray(raw.comments) ? raw.comments : [];
-    for (const entry of commentsArr) {
-      if (!entry || typeof entry !== "object") throw new ApiError(422, "Validation failed");
-      const o = entry as Record<string, unknown>;
-      if (typeof o.path !== "string" || !o.path.trim()) throw new ApiError(422, "Validation failed");
-      const pos =
-        typeof o.position === "number" && Number.isFinite(o.position) ? o.position : parseInt(String(o.position), 10);
-      if (!Number.isFinite(pos)) throw new ApiError(422, "Validation failed");
-      if (typeof o.body !== "string") throw new ApiError(422, "Validation failed");
-
+    for (const draft of commentDrafts) {
       const cRow = gh.comments.insert({
         node_id: "",
         repo_id: repo.id,
         issue_number: null,
         pull_number: pullNumber,
         commit_sha: commitId,
-        body: o.body,
+        body: draft.body,
         user_id: actor.id,
         in_reply_to_id: null,
-        path: o.path,
-        position: pos,
-        line: null,
-        side: "RIGHT",
+        path: draft.path,
+        position: draft.position,
+        line: draft.line,
+        side: draft.side,
         subject_type: "line",
         comment_type: "review",
         review_id: review.id,
@@ -211,7 +258,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     }
 
     if (event) {
-      dispatchReviewWebhook(webhooks, gh, repo, review, pr, actor, baseUrl, "submitted");
+      await dispatchReviewWebhook(webhooks, gh, repo, review, pr, actor, baseUrl, "submitted");
     }
 
     const json = formatReview(review, gh, baseUrl);
@@ -293,6 +340,9 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
 
     const raw = await parseJsonBody(c);
     const event = parseSubmitEvent(raw.event);
+    if (event !== "COMMENT" && actor.id === pr.user_id) {
+      throw new ApiError(422, "You cannot approve or request changes on your own pull request.");
+    }
 
     let bodyText: string | null = review.body;
     if (typeof raw.body === "string") bodyText = raw.body;
@@ -307,7 +357,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     });
     if (!updated) throw notFoundResponse();
 
-    dispatchReviewWebhook(webhooks, gh, repo, updated, pr, actor, baseUrl, "submitted");
+    await dispatchReviewWebhook(webhooks, gh, repo, updated, pr, actor, baseUrl, "submitted");
 
     const json = formatReview(updated, gh, baseUrl);
     if (!json) throw notFoundResponse();
@@ -344,7 +394,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     });
     if (!updated) throw notFoundResponse();
 
-    dispatchReviewWebhook(webhooks, gh, repo, updated, pr, actor, baseUrl, "dismissed");
+    await dispatchReviewWebhook(webhooks, gh, repo, updated, pr, actor, baseUrl, "dismissed");
 
     const json = formatReview(updated, gh, baseUrl);
     if (!json) throw notFoundResponse();
