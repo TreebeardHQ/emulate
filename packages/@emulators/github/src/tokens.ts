@@ -28,6 +28,15 @@ export function isRevokedToken(store: Store, token: string): boolean {
   return getRevokedTokens(store).has(token);
 }
 
+export function getInstallationTokenExpiries(store: Store): Map<string, number> {
+  let expiries = store.getData<Map<string, number>>("github.installation_token_expiries");
+  if (!expiries) {
+    expiries = new Map();
+    store.setData("github.installation_token_expiries", expiries);
+  }
+  return expiries;
+}
+
 export function revokeOAuthToken(store: Store, tokenMap: TokenMap | undefined, token: string): void {
   tokenMap?.delete(token);
   getTokenToClientId(store).delete(token);

@@ -286,7 +286,7 @@ function protectionEntityToGitHub(gh: GitHubStore, repo: GitHubRepo, bp: GitHubB
           contexts_url: `${base}/required_status_checks/contexts`,
           checks: bp.required_status_checks.contexts.map((c) => ({
             context: c,
-            app_id: null,
+            app_id: bp.required_status_checks?.checks?.find((check) => check.context === c)?.app_id ?? null,
           })),
         }
       : null,
@@ -349,6 +349,18 @@ function parseProtectionPutBody(
     required_status_checks = {
       strict: Boolean(o.strict),
       contexts: Array.isArray(o.contexts) ? o.contexts.filter((x): x is string => typeof x === "string") : [],
+      ...(Array.isArray(o.checks)
+        ? {
+            checks: o.checks.flatMap((check) => {
+              if (!check || typeof check !== "object") return [];
+              const entry = check as Record<string, unknown>;
+              return typeof entry.context === "string" &&
+                (entry.app_id === null || typeof entry.app_id === "number")
+                ? [{ context: entry.context, app_id: entry.app_id as number | null }]
+                : [];
+            }),
+          }
+        : {}),
     };
   }
 
@@ -451,7 +463,7 @@ export function branchesAndGitRoutes({ app, store, webhooks, baseUrl }: RouteCon
       contexts_url: `${base}/contexts`,
       checks: bp.required_status_checks.contexts.map((ctx) => ({
         context: ctx,
-        app_id: null,
+        app_id: bp.required_status_checks?.checks?.find((check) => check.context === ctx)?.app_id ?? null,
       })),
     });
   });

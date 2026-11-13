@@ -77,6 +77,13 @@ describe("native GitHub service", () => {
         }),
       );
       expect(pullResponse.status).toBe(201);
+      const diffResponse = await service.fetch(
+        new Request("http://localhost/repos/fixture-user/project/pulls/1", {
+          headers: { Authorization: "Bearer fixture-token", Accept: "application/vnd.github.v3.diff" },
+        }),
+      );
+      expect(diffResponse.headers.get("Content-Type")).toContain("application/vnd.github.v3.diff");
+      expect(await diffResponse.text()).toContain("diff --git a/review.txt b/review.txt");
       const invalidReview = await service.fetch(
         new Request("http://localhost/repos/fixture-user/project/pulls/1/reviews", {
           method: "POST",
@@ -152,7 +159,7 @@ describe("native GitHub service", () => {
         }),
       );
       expect(refResponse.status).toBe(200);
-      expect((await refResponse.json()).object.sha).toBe(pushedSha);
+      expect(await refResponse.json()).toMatchObject({ object: { sha: pushedSha } });
       expect(service.inspectGitHubState().pullRequests[0]?.head.sha).toBe(pushedSha);
       expect(service.inspectGitHubState().reviews[0]?.commit_id).toBe(fixture.headSha);
     } finally {

@@ -250,6 +250,7 @@ export interface GitHubBranchProtection extends Entity {
   required_status_checks: {
     strict: boolean;
     contexts: string[];
+    checks?: Array<{ context: string; app_id: number | null }>;
   } | null;
   enforce_admins: boolean;
   required_pull_request_reviews: {
@@ -475,6 +476,17 @@ export interface GitHubCheckSuite extends Entity {
   before: string;
   after: string;
   app_id: number | null;
+}
+
+export interface GitHubCommitStatus extends Entity {
+  node_id: string;
+  repo_id: number;
+  sha: string;
+  state: "error" | "failure" | "pending" | "success";
+  context: string;
+  description: string | null;
+  target_url: string | null;
+  creator_id: number;
 }
 
 export interface GitHubOAuthApp extends Entity {

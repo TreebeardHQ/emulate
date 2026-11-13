@@ -29,6 +29,17 @@ import {
   timestamp,
 } from "../helpers.js";
 import { findOrCreateCommit } from "../git-helpers.js";
+import { getNativeGitStore } from "../native-git.js";
+
+function acceptsPullRequestDiff(accept: string | undefined): boolean {
+  if (!accept) return false;
+  return accept.split(",").some((entry) => {
+    const [mediaType, ...parameters] = entry.split(";");
+    const type = mediaType?.trim().toLowerCase();
+    if (type !== "application/vnd.github.v3.diff" && type !== "application/vnd.github.diff") return false;
+    return !parameters.some((parameter) => /^\s*q\s*=\s*(?:0(?:\.0*)?|"0(?:\.0*)?")\s*$/i.test(parameter));
+  });
+}
 
 function findPull(gh: GitHubStore, repoId: number, pullNumber: number): GitHubPullRequest | undefined {
   return gh.pullRequests.findBy("repo_id", repoId).find((p) => p.number === pullNumber);
@@ -481,7 +492,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     return c.json(prFmt, 201);
   });
 
-  app.get("/repos/:owner/:repo/pulls/:pull_number", (c) => {
+  app.get("/repos/:owner/:repo/pulls/:pull_number", async (c) => {
     const owner = c.req.param("owner")!;
     const repoName = c.req.param("repo")!;
     const repo = lookupRepo(gh, owner, repoName);
@@ -493,7 +504,16 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
 
     const pr = findPull(gh, repo.id, pullNumber);
     if (!pr) throw notFoundResponse();
-
+    if (acceptsPullRequestDiff(c.req.header("Accept"))) {
+      if (store.getData<boolean>("github.native_git") === true) {
+        const nativeGit = getNativeGitStore(store);
+        if (!nativeGit.hasRepo(repo.full_name)) throw new ApiError(503, "Native Git repository is not initialized");
+        const diff = await nativeGit.diff(repo.full_name, pr.base_sha, pr.head_sha);
+        return new Response(diff, {
+          headers: { "Content-Type": "application/vnd.github.v3.diff; charset=utf-8" },
+        });
+      }
+    }
     const fmt = formatPullRequest(pr, gh, baseUrl);
     if (!fmt) throw notFoundResponse();
     return c.json(fmt);
@@ -511,6 +531,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
 
     const pr = findPull(gh, repo.id, pullNumber);
     if (!pr) throw notFoundResponse();
+    const wasDraft = pr.draft;
 
     const body = await parseJsonBody(c);
     const patch: Partial<GitHubPullRequest> = {};
@@ -568,7 +589,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     const ownerLogin = ownerLoginOf(gh, repo);
 
     if (body.state === "closed" && pr.state === "open") {
-      webhooks.dispatch(
+      await webhooks.dispatch(
         "pull_request",
         "closed",
         {
@@ -581,7 +602,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         repo.name,
       );
     } else if (body.state === "open" && pr.state === "closed") {
-      webhooks.dispatch(
+      await webhooks.dispatch(
         "pull_request",
         "reopened",
         {
@@ -593,8 +614,21 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         ownerLogin,
         repo.name,
       );
+    } else if (wasDraft && !fresh.draft) {
+      await webhooks.dispatch(
+        "pull_request",
+        "ready_for_review",
+        {
+          action: "ready_for_review",
+          pull_request: prFmt,
+          repository: formatRepo(repo, gh, baseUrl),
+          sender: formatUser(actor, baseUrl),
+        },
+        ownerLogin,
+        repo.name,
+      );
     } else if (typeof body.title === "string" || typeof body.body === "string" || body.body === null) {
-      webhooks.dispatch(
+      await webhooks.dispatch(
         "pull_request",
         "edited",
         {

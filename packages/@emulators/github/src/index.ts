@@ -1,4 +1,4 @@
-import { createHmac, generateKeyPair } from "crypto";
+import { generateKeyPair } from "crypto";
 import { constantTimeSecretEqual } from "@emulators/core";
 import type { Context, Hono } from "@emulators/core";
 import type {
@@ -12,7 +12,7 @@ import type {
 } from "@emulators/core";
 import { getGitHubStore } from "./store.js";
 import type { GitHubStore } from "./store.js";
-import { isRevokedToken } from "./tokens.js";
+import { getInstallationTokenExpiries, isRevokedToken } from "./tokens.js";
 import type { GitHubAppInstallation } from "./entities.js";
 import { generateNodeId } from "./helpers.js";
 import { usersRoutes } from "./routes/users.js";
@@ -36,9 +36,12 @@ import { metaRoutes } from "./routes/meta.js";
 import { oauthRoutes } from "./routes/oauth.js";
 import { appsRoutes } from "./routes/apps.js";
 import { installationTokenRoutes } from "./routes/installation-tokens.js";
+import { githubGraphqlRoutes } from "./routes/graphql.js";
+import { commitStatusRoutes } from "./routes/statuses.js";
 import { findOrCreateBlob, findOrCreateCommit, findOrCreateTree } from "./git-helpers.js";
 
 export { getGitHubStore, type GitHubStore } from "./store.js";
+export { createGitHubService, type GitHubService, type GitHubServiceOptions, type GitHubServiceAction, type GitHubStateSnapshot } from "./service.js";
 export * from "./entities.js";
 
 export interface GitHubSeedConfig {
@@ -602,6 +605,7 @@ function enrichPayloadWithInstallation(payload: unknown, installation: GitHubApp
 
 async function deliverToAppWebhookUrls(
   gh: GitHubStore,
+  webhooks: WebhookDispatcher,
   event: string,
   action: string | undefined,
   payload: unknown,
@@ -615,28 +619,19 @@ async function deliverToAppWebhookUrls(
     if (!ghApp?.webhook_url) continue;
 
     const enriched = enrichPayloadWithInstallation(payload, inst);
-    const body = JSON.stringify(enriched);
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "X-GitHub-Event": event,
-      "X-GitHub-Delivery": String(Date.now()),
-    };
-    if (ghApp.webhook_secret) {
-      const hmac = createHmac("sha256", ghApp.webhook_secret).update(body).digest("hex");
-      headers["X-Hub-Signature-256"] = `sha256=${hmac}`;
-    }
-
-    try {
-      await fetch(ghApp.webhook_url, {
-        method: "POST",
-        headers,
-        body,
-        signal: AbortSignal.timeout(10000),
-      });
-    } catch {
-      // Best-effort delivery
-    }
+    await webhooks.deliverDirect(
+      {
+        url: ghApp.webhook_url,
+        events: [event],
+        active: true,
+        secret: ghApp.webhook_secret ?? undefined,
+        owner: ownerLogin,
+        repo: repoName,
+      },
+      event,
+      action,
+      enriched,
+    );
   }
 }
 
@@ -659,7 +654,7 @@ export const githubPlugin: ServicePlugin = {
         installations.length > 0 ? enrichPayloadWithInstallation(payload, installations[0]) : payload;
 
       await originalDispatch(event, action, enrichedPayload, owner, repo);
-      await deliverToAppWebhookUrls(gh, event, action, payload, owner, repo);
+      await deliverToAppWebhookUrls(gh, webhooks, event, action, payload, owner, repo);
     };
 
     // GitHub rejects credentials it cannot resolve. The default remains permissive: an unknown token acts as the
@@ -668,20 +663,34 @@ export const githubPlugin: ServicePlugin = {
       const header = c.req.header("Authorization")?.trim();
       if (!header) return next();
 
-      const presented = header.replace(/^(Bearer|token)\s+/i, "").trim();
-      if (isRevokedToken(store, presented)) return badCredentials(c);
-
-      if (store.getData<boolean>("github.strict_scopes") !== true || c.get("authApp")) return next();
-      if (tokenMap?.has(presented)) return next();
-
       if (/^Basic\s/i.test(header)) {
+        const decoded = Buffer.from(header.replace(/^Basic\s+/i, ""), "base64").toString();
+        const separator = decoded.indexOf(":");
+        const basicToken = separator >= 0 ? decoded.slice(separator + 1) : "";
+        const basicUser = tokenMap?.get(basicToken);
+        if (basicUser) {
+          if (isRevokedToken(store, basicToken)) return badCredentials(c);
+          const expiresAt = getInstallationTokenExpiries(store).get(basicToken);
+          if (expiresAt !== undefined && Date.now() >= expiresAt) return badCredentials(c);
+          c.set("authUser", basicUser);
+          c.set("authToken", basicToken);
+          c.set("authScopes", basicUser.scopes);
+          return next();
+        }
         if (!isOAuthAppCredential(gh, header)) return badCredentials(c);
-        // OAuth app credentials belong to the app, not to a user: drop the fallback identity.
         c.set("authUser", undefined);
         c.set("authToken", undefined);
         c.set("authScopes", undefined);
         return next();
       }
+
+      const presented = header.replace(/^(Bearer|token)\s+/i, "").trim();
+      if (isRevokedToken(store, presented)) return badCredentials(c);
+      const expiresAt = getInstallationTokenExpiries(store).get(presented);
+      if (expiresAt !== undefined && Date.now() >= expiresAt) return badCredentials(c);
+
+      if (store.getData<boolean>("github.strict_scopes") !== true || c.get("authApp")) return next();
+      if (tokenMap?.has(presented)) return next();
 
       return badCredentials(c);
     });
@@ -706,6 +715,8 @@ export const githubPlugin: ServicePlugin = {
     oauthRoutes(ctx);
     appsRoutes(ctx);
     installationTokenRoutes(ctx);
+    githubGraphqlRoutes(ctx);
+    commitStatusRoutes(ctx);
     contentsRoutes(ctx);
     // Registered last: the catch-all /commits/:ref{.+} route must not shadow
     // /commits/:sha/comments (comments.ts) or /commits/:ref/check-* (checks.ts).
@@ -720,6 +731,7 @@ export default githubPlugin;
 
 function badCredentials(c: Context<AppEnv>) {
   const docsUrl = (c.get("docsUrl") as string | undefined) ?? "https://emulate.dev";
+  c.header("WWW-Authenticate", 'Basic realm="GitHub"');
   return c.json({ message: "Bad credentials", documentation_url: docsUrl }, 401);
 }
 

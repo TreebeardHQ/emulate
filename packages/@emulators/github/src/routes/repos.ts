@@ -793,30 +793,37 @@ export function reposRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       });
     }
 
-    if (repo.owner_type === "Organization" && isOrgMember(gh, target.id, repo.owner_id)) {
-      return c.json({
-        permission: "admin",
-        role_name: "admin",
-        user: formatUser(target, baseUrl),
-      });
-    }
-
     const collab = gh.collaborators.findBy("repo_id", repo.id).find((col) => col.user_id === target.id);
-    if (!collab) throw notFoundResponse();
-
-    const roleName =
-      collab.permission === "admin"
-        ? "admin"
-        : collab.permission === "maintain"
-          ? "maintain"
-          : collab.permission === "push"
-            ? "write"
-            : collab.permission === "triage"
-              ? "triage"
-              : "read";
+    let roleName = collab?.permission === "push" ? "write" : collab?.permission === "pull" ? "read" : collab?.permission;
+    if (repo.owner_type === "User" && repo.owner_id === target.id) roleName = "admin";
+    if (repo.owner_type === "Organization") {
+      const memberships = gh.teamMembers.findBy("user_id", target.id).filter((membership) => {
+        return gh.teams.get(membership.team_id)?.org_id === repo.owner_id;
+      });
+      const orgAdmin = memberships.some((membership) => {
+        const team = gh.teams.get(membership.team_id);
+        return team?.slug === "members" && membership.role === "maintainer";
+      });
+      if (orgAdmin) roleName = "admin";
+      else {
+        const org = gh.orgs.get(repo.owner_id);
+        const defaultPermission = org?.default_repository_permission;
+        const rank: Record<string, number> = { none: 0, read: 1, triage: 2, write: 3, push: 3, maintain: 4, admin: 5 };
+        const teamPermission = memberships.reduce((highest, membership) => {
+          const team = gh.teams.get(membership.team_id);
+          if (!team || !gh.teamRepos.findBy("team_id", team.id).some((link) => link.repo_id === repo.id)) return highest;
+          return (rank[team.permission] ?? 0) > (rank[highest] ?? 0) ? team.permission : highest;
+        }, "none");
+        const orgPermission = (rank[defaultPermission ?? "none"] ?? 0) > (rank[teamPermission] ?? 0) ? defaultPermission : teamPermission;
+        if ((rank[orgPermission ?? "none"] ?? 0) > (rank[roleName ?? "none"] ?? 0)) roleName = orgPermission;
+      }
+    }
+    if (!roleName) roleName = "none";
+    if (roleName === "push") roleName = "write";
+    const permission = roleName === "admin" ? "admin" : roleName === "write" || roleName === "maintain" ? "write" : roleName === "none" ? "none" : "read";
 
     return c.json({
-      permission: collab.permission,
+      permission,
       role_name: roleName,
       user: formatUser(target, baseUrl),
     });

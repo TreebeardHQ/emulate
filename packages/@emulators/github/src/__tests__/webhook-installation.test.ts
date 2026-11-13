@@ -232,7 +232,7 @@ describe("webhook installation enrichment", () => {
     expect(body.installation.node_id).toBeTruthy();
     expect(headers["Content-Type"]).toBe("application/json");
     expect(headers["X-GitHub-Event"]).toBe("issues");
-    expect(headers["X-GitHub-Delivery"]).toBe("1");
+    expect(headers["X-GitHub-Delivery"]).toMatch(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
   });
 
   it("does not include installation when no app is installed", async () => {
@@ -874,7 +874,7 @@ describe("GitHub App installation token flow", () => {
             headers: { Authorization: `Bearer ${minted.token}` },
           })
         ).status,
-      ).toBe(200);
+      ).toBe(401);
     } finally {
       vi.useRealTimers();
     }

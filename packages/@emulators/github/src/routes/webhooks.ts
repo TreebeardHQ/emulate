@@ -113,7 +113,7 @@ function parseHookConfig(raw: unknown, existing?: GitHubWebhook["config"]): GitH
 function formatHookDelivery(d: WebhookDelivery, baseUrl: string, pathPrefix: string, hookId: number) {
   return {
     id: d.id,
-    guid: `${d.hook_id}-${d.id}-${d.delivered_at}`,
+    guid: d.delivery_id,
     delivered_at: d.delivered_at,
     redelivery: false,
     duration: d.duration,
@@ -348,6 +348,24 @@ export function webhooksRoutes({ app, store, webhooks, baseUrl }: RouteContext):
 
     const pp = pathPrefixForWebhook(wh, `${owner}/${repoName}`);
     return c.json(formatHookDelivery(d, baseUrl, pp, wh.id));
+  });
+
+  app.post("/repos/:owner/:repo/hooks/:hook_id/deliveries/:delivery_id/attempts", async (c) => {
+    const owner = c.req.param("owner")!;
+    const repoName = c.req.param("repo")!;
+    const hookId = Number(c.req.param("hook_id"));
+    const deliveryId = Number(c.req.param("delivery_id"));
+    const repo = lookupRepo(gh, owner, repoName);
+    if (!repo) throw notFoundResponse();
+    assertRepoAdmin(gh, c.get("authUser"), repo);
+    if (!Number.isFinite(hookId) || !Number.isFinite(deliveryId)) throw notFoundResponse();
+    const wh = findRepoHook(gh, repo.id, hookId);
+    if (!wh) throw notFoundResponse();
+    if (!webhooks.getDeliveries(wh.id).some((delivery) => delivery.id === deliveryId)) throw notFoundResponse();
+    const delivery = await webhooks.redeliver(deliveryId);
+    if (!delivery) throw notFoundResponse();
+    const pp = pathPrefixForWebhook(wh, `${owner}/${repoName}`);
+    return c.json(formatHookDelivery(delivery, baseUrl, pp, wh.id), 202);
   });
 
   // --- Organization webhooks ---
