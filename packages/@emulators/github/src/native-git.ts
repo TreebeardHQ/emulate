@@ -49,7 +49,7 @@ export interface NativeGitTreeEntry {
 export class NativeGitStore {
   private root?: string;
   private closed = false;
-  private readonly activeHttpProcesses = new Set<{ kill: () => void; cancelBody: () => Promise<void>; exited: Promise<number> }>();
+  private readonly activeHttpProcesses = new Set<{ kill: () => Promise<void>; cancelBody: () => Promise<void>; exited: Promise<number> }>();
   private readonly initializedRepos = new Set<string>();
 
   attach(store: Store): this {
@@ -290,26 +290,53 @@ export class NativeGitStore {
       child.once("error", rejectExit);
       child.once("close", (code) => resolveExit(code ?? 1));
     });
+    const spawned = new Promise<void>((resolveSpawn, rejectSpawn) => {
+      child.once("spawn", resolveSpawn);
+      child.once("error", rejectSpawn);
+    });
+    let termination: Promise<void> | undefined;
     const killProcessGroup = () => {
-      if (child.pid === undefined) return;
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error) {
-        if (!(error && typeof error === "object" && "code" in error && error.code === "ESRCH")) throw error;
+      if (!termination) {
+        termination = (async () => {
+          await spawned;
+          if (child.pid === undefined) return;
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch (error) {
+            if (!(error && typeof error === "object" && "code" in error && error.code === "ESRCH")) throw error;
+          }
+        })();
       }
+      return termination;
     };
     const requestAbort = new AbortController();
-    const cancelBody = async () => { requestAbort.abort(); };
+    let requestPipeStarted = false;
+    const cancelBody = async () => {
+      requestAbort.abort();
+      if (!requestPipeStarted) await body?.cancel().catch(() => undefined);
+    };
     const activeProcess = { kill: killProcessGroup, cancelBody, exited };
     this.activeHttpProcesses.add(activeProcess);
     void exited.finally(() => this.activeHttpProcesses.delete(activeProcess)).catch(() => undefined);
     if (body) void exited.then(cancelBody).catch(() => undefined);
-    const requestFinished = body
-      ? body.pipeTo(Writable.toWeb(child.stdin), { signal: requestAbort.signal }).catch((error) => {
-          killProcessGroup();
-          throw error;
-        })
-      : Promise.resolve().then(() => child.stdin.end());
+    let requestFinished: Promise<unknown>;
+    try {
+      await spawned;
+      this.assertOpen();
+      requestPipeStarted = true;
+      requestFinished = body
+        ? body.pipeTo(Writable.toWeb(child.stdin), { signal: requestAbort.signal }).catch(async (error) => {
+            await killProcessGroup();
+            throw error;
+          })
+        : Promise.resolve().then(() => child.stdin.end());
+      void requestFinished.catch(() => undefined);
+    } catch (error) {
+      await cancelBody();
+      if (child.pid !== undefined && !this.closed) await killProcessGroup();
+      await exited.catch(() => 1);
+      throw error;
+    }
     const outputReader = Readable.toWeb(child.stdout).getReader();
     const prefix: Uint8Array[] = [];
     let prefixSize = 0;
@@ -321,7 +348,10 @@ export class NativeGitStore {
     try {
       while (headerEnd < 0) {
         const { done, value } = await outputReader.read();
-        if (done) throw new Error("git http-backend closed before sending CGI headers");
+        if (done) {
+          await requestFinished;
+          throw new Error("git http-backend closed before sending CGI headers");
+        }
         prefix.push(value);
         prefixSize += value.length;
         const joined = Buffer.concat(prefix.map((chunk) => Buffer.from(chunk)), prefixSize);
@@ -339,7 +369,8 @@ export class NativeGitStore {
         }
       }
     } catch (error) {
-      killProcessGroup();
+      await cancelBody();
+      await killProcessGroup();
       await exited.catch(() => 1);
       throw error;
     }
@@ -380,12 +411,11 @@ export class NativeGitStore {
       },
       async cancel() {
         await cancelBody();
-        killProcessGroup();
+        await killProcessGroup();
         outputReader.releaseLock();
         await exited.catch(() => 1);
       },
     });
-    void requestFinished.catch(() => undefined);
     return new Response(responseBody, { status, headers });
   }
 
@@ -448,7 +478,7 @@ export class NativeGitStore {
     if (this.closed) return;
     this.closed = true;
     const children = [...this.activeHttpProcesses];
-    for (const child of children) child.kill();
+    await Promise.all(children.map((child) => child.kill()));
     await Promise.all(children.map((child) => child.cancelBody()));
     const exits = await Promise.allSettled(children.map((child) => child.exited));
     if (this.root) await rm(this.root, { recursive: true, force: true });

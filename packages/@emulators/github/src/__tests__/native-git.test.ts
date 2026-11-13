@@ -14,6 +14,14 @@ import { projectNativeGit } from "../native-projection.js";
 
 const temporaryDirectories: string[] = [];
 const execFileAsync = promisify(execFile);
+const bunAvailable = (() => {
+  try {
+    execFileSync("bun", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -214,6 +222,38 @@ exec '${realGit}' "$@"
       process.env.PATH = previousPath;
       await store.close();
     }
+  });
+
+  it.skipIf(!bunAvailable)("reaps native smart HTTP subprocesses when a Bun request stream fails", () => {
+    const nativeGitUrl = new URL("../native-git.ts", import.meta.url).href;
+    const script = `
+const { createNativeGitStore } = await import(${JSON.stringify(nativeGitUrl)});
+const native = createNativeGitStore();
+let unhandledRejections = 0;
+process.on("unhandledRejection", () => { unhandledRejections += 1; });
+try {
+  await native.httpBackend(
+    "fixture/project",
+    "/fixture/project.git/git-upload-pack",
+    "POST",
+    "",
+    "application/x-git-upload-pack-request",
+    undefined,
+    new ReadableStream({ start(controller) { controller.error(new Error("synthetic input failure")); } }),
+    undefined,
+    "fixture",
+  );
+  throw new Error("httpBackend accepted the failed request stream");
+} catch (error) {
+  if (!(error instanceof Error) || error.message !== "synthetic input failure") throw error;
+}
+await native.close();
+await new Promise((resolve) => setTimeout(resolve, 0));
+if (unhandledRejections !== 0) throw new Error("request stream failure created an unhandled rejection");
+console.log("BUN_HTTP_BACKEND_CLOSED");
+`;
+    const output = execFileSync("bun", ["run", "-"], { input: script, encoding: "utf8", timeout: 5000 });
+    expect(output).toContain("BUN_HTTP_BACKEND_CLOSED");
   });
 
   it("serves native clone, exact SHA fetch, push, and binary contents over smart HTTP", async () => {
