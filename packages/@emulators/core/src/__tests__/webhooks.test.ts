@@ -176,6 +176,27 @@ describe("WebhookDispatcher", () => {
       expect(mockFetch.mock.calls.map((c) => c[0])).toEqual(["https://hooks.example/1", "https://hooks.example/2"]);
     });
 
+    it("assigns the same delivery identity to the same fixture event in a fresh dispatcher", async () => {
+      const payload = { action: "synchronize", pull_request: { number: 1, head: { sha: "abc" } } };
+      const ids: string[] = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const dispatcher = new WebhookDispatcher();
+        const subscription = dispatcher.register({
+          url: "https://hooks.example/review",
+          events: ["pull_request"],
+          active: true,
+          owner: "acme",
+          repo: "project",
+          secret: "fixture-secret",
+        });
+        await dispatcher.dispatch("pull_request", "synchronize", payload, "acme", "project");
+        const delivery = dispatcher.getDeliveries(subscription.id)[0]!;
+        ids.push(delivery.delivery_id);
+      }
+      expect(ids[0]).toMatch(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+      expect(ids[1]).toBe(ids[0]);
+    });
+
     it("respects event filtering (and allows ping for any subscription)", async () => {
       const d = new WebhookDispatcher();
       d.register({
@@ -342,7 +363,7 @@ describe("WebhookDispatcher", () => {
       return { dispatcher, subscription };
     }
 
-    it("replays the recorded payload only to its subscription and signs a new delivery", async () => {
+    it("replays the recorded payload only to its subscription with the original signed delivery identity", async () => {
       const { dispatcher, subscription } = setup();
       const payload = { action: "opened", issue: { title: "Original" } };
       await dispatcher.dispatch("issues", "opened", payload, "acme");
@@ -357,7 +378,7 @@ describe("WebhookDispatcher", () => {
       expect(request.body).toBe(mockFetch.mock.calls[0]![1].body);
       expect(request.headers).toMatchObject({
         "X-GitHub-Event": "issues",
-        "X-GitHub-Delivery": "2",
+        "X-GitHub-Delivery": dispatcher.getDeliveries()[0]!.delivery_id,
         "X-Retry": "1",
         "X-Hub-Signature-256": `sha256=${createHmac("sha256", "secret").update(request.body).digest("hex")}`,
       });
@@ -368,6 +389,7 @@ describe("WebhookDispatcher", () => {
         action: "opened",
         redelivery_of: 1,
         redelivery_count: 1,
+        delivery_id: dispatcher.getDeliveries()[0]!.delivery_id,
         success: true,
       });
       expect(dispatcher.getDeliveries()[0]).not.toHaveProperty("redelivery_of");
@@ -434,9 +456,12 @@ describe("WebhookDispatcher", () => {
     it("bounds retry history without resetting the retry count", async () => {
       const { dispatcher } = setup();
       await dispatcher.dispatch("issues", undefined, {}, "acme");
+      const observed: number[] = [];
+      dispatcher.observeDeliveries((delivery) => observed.push(delivery.id));
       for (let id = 1; id <= 1001; id++) await dispatcher.redeliver(id);
       expect(dispatcher.getDeliveries()).toHaveLength(1000);
       expect(dispatcher.getDeliveries().at(-1)).toMatchObject({ id: 1002, redelivery_count: 1001 });
+      expect(observed).toEqual(Array.from({ length: 1001 }, (_, index) => index + 2));
       expect(await dispatcher.redeliver(1)).toBeUndefined();
     });
   });

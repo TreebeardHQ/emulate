@@ -1,4 +1,4 @@
-import { createHmac } from "crypto";
+import { createHash, createHmac } from "crypto";
 
 export interface WebhookSubscription {
   id: number;
@@ -12,6 +12,7 @@ export interface WebhookSubscription {
 
 export interface WebhookDelivery {
   id: number;
+  delivery_id: string;
   hook_id: number;
   event: string;
   action?: string;
@@ -30,17 +31,19 @@ export interface WebhookHeaderContext {
   body: string;
   subscription: Readonly<WebhookSubscription>;
   deliveryId: number;
+  deliveryGuid: string;
 }
 
 export type WebhookHeaderFactory = (context: WebhookHeaderContext) => Record<string, string>;
+export type WebhookDeliveryObserver = (delivery: Readonly<WebhookDelivery>) => void;
 
 const MAX_DELIVERIES = 1000;
 
-function githubHeaders({ event, body, subscription, deliveryId }: WebhookHeaderContext): Record<string, string> {
+function githubHeaders({ event, body, subscription, deliveryGuid }: WebhookHeaderContext): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-GitHub-Event": event,
-    "X-GitHub-Delivery": String(deliveryId),
+    "X-GitHub-Delivery": deliveryGuid,
   };
 
   if (subscription.secret) {
@@ -56,13 +59,22 @@ export class WebhookDispatcher {
     if (options.neutral) this.headerFactory = () => ({ "Content-Type": "application/json" });
   }
   private subscriptions: WebhookSubscription[] = [];
+  private directSubscriptions = new Map<number, WebhookSubscription>();
+  private directSubscriptionKeys = new Map<string, number>();
+  private deliverySequence = 0;
   private deliveries: WebhookDelivery[] = [];
   private subscriptionIdCounter = 1;
   private deliveryIdCounter = 1;
   private headerFactory: WebhookHeaderFactory = githubHeaders;
+  private deliveryObservers = new Set<WebhookDeliveryObserver>();
 
   setHeaderFactory(factory: WebhookHeaderFactory): void {
     this.headerFactory = factory;
+  }
+
+  observeDeliveries(observer: WebhookDeliveryObserver): () => void {
+    this.deliveryObservers.add(observer);
+    return () => this.deliveryObservers.delete(observer);
   }
 
   register(sub: Omit<WebhookSubscription, "id"> & { id?: number }): WebhookSubscription {
@@ -134,13 +146,31 @@ export class WebhookDispatcher {
   ): Promise<WebhookDelivery | undefined> {
     const original = this.deliveries.find((delivery) => delivery.id === deliveryId);
     if (!original) return undefined;
-    const sub = this.getSubscription(original.hook_id);
+    const sub = this.getSubscription(original.hook_id) ?? this.directSubscriptions.get(original.hook_id);
     if (!sub?.active) return undefined;
     return this.deliver(sub, original.event, original.action, original.payload, {
-      headers: options.headers,
+      headers: { "X-GitHub-Delivery": original.delivery_id, ...options.headers },
       redelivery_of: original.id,
       redelivery_count: (original.redelivery_count ?? 0) + 1,
+      delivery_id: original.delivery_id,
     });
+  }
+
+  async deliverDirect(
+    subscription: Omit<WebhookSubscription, "id">,
+    event: string,
+    action: string | undefined,
+    payload: unknown,
+  ): Promise<WebhookDelivery> {
+    const key = createHash("sha256").update(JSON.stringify(subscription)).digest("hex");
+    let id = this.directSubscriptionKeys.get(key);
+    if (id === undefined) {
+      id = this.subscriptionIdCounter++;
+      this.directSubscriptionKeys.set(key, id);
+      this.directSubscriptions.set(id, { ...subscription, id });
+    }
+    const sub = this.directSubscriptions.get(id)!;
+    return this.deliver(sub, event, action, payload);
   }
 
   private async deliver(
@@ -148,11 +178,17 @@ export class WebhookDispatcher {
     event: string,
     action: string | undefined,
     payload: unknown,
-    options: { headers?: Record<string, string>; redelivery_of?: number; redelivery_count?: number } = {},
+    options: { headers?: Record<string, string>; redelivery_of?: number; redelivery_count?: number; delivery_id?: string } = {},
   ): Promise<WebhookDelivery> {
     const body = JSON.stringify(payload);
+    const occurrence = ++this.deliverySequence;
+    const deliveryGuid = options.delivery_id ?? createHash("sha256")
+      .update(JSON.stringify({ hook: sub.id, event, action: action ?? null, payload, occurrence }))
+      .digest("hex")
+      .replace(/^([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12}).*$/, "$1-$2-$3-$4-$5");
     const delivery: WebhookDelivery = {
       id: this.deliveryIdCounter++,
+      delivery_id: deliveryGuid,
       hook_id: sub.id,
       event,
       action,
@@ -174,7 +210,7 @@ export class WebhookDispatcher {
 
     try {
       const headers = {
-        ...this.headerFactory({ event, action, body, subscription: sub, deliveryId: delivery.id }),
+        ...this.headerFactory({ event, action, body, subscription: sub, deliveryId: delivery.id, deliveryGuid }),
         ...options.headers,
       };
       const start = Date.now();
@@ -193,6 +229,7 @@ export class WebhookDispatcher {
       delivery.duration = 0;
       delivery.success = false;
     }
+    for (const observer of this.deliveryObservers) observer(structuredClone(delivery));
     return delivery;
   }
 
@@ -205,7 +242,11 @@ export class WebhookDispatcher {
 
   clear(): void {
     this.subscriptions.length = 0;
+    this.directSubscriptions.clear();
+    this.directSubscriptionKeys.clear();
+    this.deliverySequence = 0;
     this.deliveries.length = 0;
+    this.deliveryObservers.clear();
     this.subscriptionIdCounter = 1;
     this.deliveryIdCounter = 1;
   }
