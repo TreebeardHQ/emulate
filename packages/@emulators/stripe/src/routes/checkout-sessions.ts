@@ -2,11 +2,20 @@ import type { RouteContext } from "@emulators/core";
 import { renderCardPage, renderCheckoutPage, escapeHtml, escapeAttr } from "@emulators/core";
 import type { CheckoutLineItem } from "@emulators/core";
 import { getStripeStore } from "../store.js";
-import { stripeId, toUnixTimestamp, parseStripeBody, stripeError, stripeList } from "../helpers.js";
+import { stripeId, toUnixTimestamp, parseStripeBody, stripeError, stripeList, stripeRequestKey } from "../helpers.js";
 import { completeSubscription, dispatchStripeEvent } from "../subscriptions.js";
 import type { StripeCheckoutSession } from "../entities.js";
 
 const SERVICE_LABEL = "Stripe";
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)]));
+  }
+  return value;
+}
+
 
 function formatSession(s: StripeCheckoutSession, baseUrl: string) {
   return {
@@ -29,8 +38,18 @@ function formatSession(s: StripeCheckoutSession, baseUrl: string) {
 export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteContext): void {
   const ss = getStripeStore(store);
 
+  const replays = new Map<string, { params: string; response: ReturnType<typeof formatSession> }>();
+
   app.post("/v1/checkout/sessions", async (c) => {
     const body = await parseStripeBody(c);
+    const key = c.req.header("Idempotency-Key");
+    const scope = JSON.stringify([stripeRequestKey(c.req.header("Authorization")), key]);
+    const params = JSON.stringify(canonical(body));
+    const replay = key ? replays.get(scope) : undefined;
+    if (replay) {
+      if (replay.params !== params) return stripeError(c, 400, "invalid_request_error", "Idempotency-Key was reused with different parameters.", "idempotency_key_in_use");
+      return c.json(replay.response);
+    }
     if (!body.mode)
       return stripeError(c, 400, "invalid_request_error", "Missing required param: mode.", undefined, "mode");
 
@@ -112,7 +131,9 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       subscription_metadata: (body.subscription_data as { metadata?: Record<string, string> } | undefined)?.metadata ?? {},
       metadata: (body.metadata as Record<string, string>) ?? {},
     });
-    return c.json(formatSession(session, baseUrl), 200);
+    const response = formatSession(session, baseUrl);
+    if (key) replays.set(scope, { params, response });
+    return c.json(response, 200);
   });
 
   app.get("/v1/checkout/sessions/:id", (c) => {

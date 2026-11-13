@@ -101,3 +101,16 @@ describe("billing portal", () => {
     expect((await app.request(`/portal/${portal.id}/cancel`, { method: "POST", body: new URLSearchParams({ subscription: "sub_other", action: "cancel_now" }) })).status).toBe(404);
   });
 });
+
+describe("Checkout idempotency", () => {
+  it("replays the original response after completion and refuses different parameters", async () => {
+    const { app } = setup();
+    const first = await checkout(app, { "Idempotency-Key": "checkout-acme" });
+    await app.request(`/checkout/${first.id}/complete`, { method: "POST" });
+    expect(await checkout(app, { "Idempotency-Key": "checkout-acme" })).toEqual(first);
+    const conflict = await app.request("/v1/checkout/sessions", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "checkout-acme" }, body: JSON.stringify({ mode: "payment" }) });
+    expect(conflict.status).toBe(400);
+    const sessions = await (await app.request("/v1/checkout/sessions")).json();
+    expect(sessions.data).toHaveLength(1);
+  });
+});
