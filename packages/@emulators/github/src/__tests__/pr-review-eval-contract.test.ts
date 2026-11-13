@@ -129,6 +129,41 @@ describe("PR review eval API contracts", () => {
     expect(await noAccess.json()).toMatchObject({ permission: "none", role_name: "none" });
   });
 
+  it("does not apply an organization default permission to known outsiders", async () => {
+    const { app, store, tokens } = setup();
+    tokens.set("outsider", { login: "outsider", id: 30, scopes: ["repo"] });
+    tokens.set("collaborator", { login: "collaborator", id: 31, scopes: ["repo"] });
+    seedFromConfig(store, base, {
+      users: [{ login: "outsider" }, { login: "collaborator" }],
+      orgs: [{ login: "sample-org", members: [{ login: "reviewer[bot]" }] }],
+      repos: [{ owner: "sample-org", name: "private-project", private: true }],
+    });
+    const gh = getGitHubStore(store);
+    const org = gh.orgs.findOneBy("login", "sample-org")!;
+    gh.orgs.update(org.id, { default_repository_permission: "write" });
+    const repo = gh.repos.findOneBy("full_name", "sample-org/private-project")!;
+    const collaborator = gh.users.findOneBy("login", "collaborator")!;
+    gh.collaborators.insert({ repo_id: repo.id, user_id: collaborator.id, permission: "maintain" });
+
+    const role = async (login: string) => {
+      const response = await app.request(`${base}/repos/sample-org/private-project/collaborators/${login}/permission`, {
+        headers: headers("reviewer"),
+      });
+      expect(response.status).toBe(200);
+      return await response.json();
+    };
+    expect(await role("reviewer[bot]")).toMatchObject({ permission: "write", role_name: "write" });
+    expect(await role("outsider")).toMatchObject({ permission: "none", role_name: "none" });
+    expect(await role("collaborator")).toMatchObject({ permission: "write", role_name: "maintain" });
+
+    const hiddenRepo = await app.request(`${base}/repos/sample-org/private-project`, { headers: headers("outsider") });
+    expect(hiddenRepo.status).toBe(404);
+    const hiddenPermission = await app.request(`${base}/repos/sample-org/private-project/collaborators/outsider/permission`, {
+      headers: headers("outsider"),
+    });
+    expect(hiddenPermission.status).toBe(404);
+  });
+
   it("rejects author self-approval and self change requests with 422", async () => {
     const { app } = setup();
     const pr = await createPullRequest(app);

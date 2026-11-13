@@ -814,7 +814,9 @@ export function reposRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
           if (!team || !gh.teamRepos.findBy("team_id", team.id).some((link) => link.repo_id === repo.id)) return highest;
           return (rank[team.permission] ?? 0) > (rank[highest] ?? 0) ? team.permission : highest;
         }, "none");
-        const orgPermission = (rank[defaultPermission ?? "none"] ?? 0) > (rank[teamPermission] ?? 0) ? defaultPermission : teamPermission;
+        const orgPermission = memberships.length > 0 && (rank[defaultPermission ?? "none"] ?? 0) > (rank[teamPermission] ?? 0)
+          ? defaultPermission
+          : teamPermission;
         if ((rank[orgPermission ?? "none"] ?? 0) > (rank[roleName ?? "none"] ?? 0)) roleName = orgPermission;
       }
     }
