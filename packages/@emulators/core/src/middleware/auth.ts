@@ -78,6 +78,30 @@ export interface AuthFallback {
   scopes: string[];
 }
 
+const APP_JWT_MAX_LIFETIME_SECONDS = 10 * 60;
+const APP_JWT_CLOCK_SKEW_SECONDS = 60;
+
+function hasValidAppJwtClaims(payload: unknown): payload is { iss: string | number; iat: number; exp: number } {
+  if (!payload || typeof payload !== "object") return false;
+  const claims = payload as Record<string, unknown>;
+  const issuer = claims.iss;
+  const issuerText = typeof issuer === "number" ? String(issuer) : issuer;
+  const appId = typeof issuerText === "string" && /^\d+$/.test(issuerText) ? Number(issuerText) : NaN;
+  const issuedAt = claims.iat;
+  const expiresAt = claims.exp;
+  if (
+    !Number.isSafeInteger(appId) || appId <= 0 ||
+    typeof issuedAt !== "number" || !Number.isFinite(issuedAt) ||
+    typeof expiresAt !== "number" || !Number.isFinite(expiresAt)
+  ) return false;
+
+  const now = Math.floor(Date.now() / 1000);
+  return issuedAt <= now + APP_JWT_CLOCK_SKEW_SECONDS &&
+    expiresAt > now &&
+    expiresAt <= now + APP_JWT_MAX_LIFETIME_SECONDS &&
+    expiresAt - issuedAt <= APP_JWT_MAX_LIFETIME_SECONDS;
+}
+
 export function authMiddleware(tokens: TokenMap, appKeyResolver?: AppKeyResolver, fallbackUser?: AuthFallback) {
   return async (c: Context, next: Next) => {
     const authHeader = c.req.header("Authorization");
@@ -88,6 +112,7 @@ export function authMiddleware(tokens: TokenMap, appKeyResolver?: AppKeyResolver
         try {
           const [, payloadB64] = token.split(".");
           const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+          if (!hasValidAppJwtClaims(payload)) throw new Error("Invalid GitHub App JWT claims");
           const appId = typeof payload.iss === "string" ? parseInt(payload.iss, 10) : payload.iss;
 
           if (typeof appId === "number" && !isNaN(appId)) {

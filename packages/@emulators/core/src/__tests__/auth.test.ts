@@ -109,6 +109,33 @@ describe("authMiddleware", () => {
     const body = (await res.json()) as { app: { appId: number; slug: string; name: string } };
     expect(body.app).toEqual({ appId: 42, slug: "my-app", name: "My App" });
   });
+
+  it("rejects signed App JWTs without bounded temporal claims", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const now = Math.floor(Date.now() / 1000);
+    const valid = { iss: "42", iat: now - 60, exp: now + 540 };
+    const invalidClaims = [
+      { iat: now - 60, exp: now + 540 },
+      { iss: "42", iat: now - 60 },
+      { iss: "42", exp: now + 540 },
+      { ...valid, exp: now + 541 },
+      { ...valid, iat: now + 61, exp: now + 600 },
+      { ...valid, exp: now - 1 },
+    ];
+
+    for (const claims of invalidClaims) {
+      const app = new Hono<AppEnv>();
+      app.use("*", authMiddleware(tokenMap, (appId) => appId === 42
+        ? { privateKey: privateKeyPem, slug: "my-app", name: "My App" }
+        : null));
+      app.get("/test", (c) => c.json({ app: c.get("authApp") ?? null }));
+      const res = await app.request("/test", {
+        headers: { Authorization: `Bearer ${createAppJwt(claims, privateKeyPem)}` },
+      });
+      expect(await res.json()).toEqual({ app: null });
+    }
+  });
 });
 
 describe("requireAuth", () => {
@@ -149,10 +176,12 @@ describe("requireAuth", () => {
   });
 });
 
-function createAppJwt(appId: string, privateKey: string): string {
+function createAppJwt(claims: Record<string, unknown> | string, privateKey: string): string {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
-  const payload = { iat: nowSeconds - 60, exp: nowSeconds + 9 * 60, iss: appId };
+  const payload = typeof claims === "string"
+    ? { iat: nowSeconds - 60, exp: nowSeconds + 9 * 60, iss: claims }
+    : claims;
   const unsigned = `${base64UrlJson(header)}.${base64UrlJson(payload)}`;
   return `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url")}`;
 }
