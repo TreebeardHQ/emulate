@@ -73,7 +73,7 @@ export interface StripeCheckoutSession extends Entity {
 export interface StripeSubscription extends Entity {
   stripe_id: string;
   customer_id: string;
-  status: "active" | "canceled";
+  status: "active" | "past_due" | "canceled";
   cancel_at_period_end: boolean;
   current_period_start: number;
   current_period_end: number;

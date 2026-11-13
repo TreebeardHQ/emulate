@@ -45,3 +45,36 @@ describe("subscription Checkout", () => {
     expect((await (await app.request(`/v1/checkout/sessions/${session.id}`)).json()).subscription).toBe(sub.id);
   });
 });
+
+describe("subscription events", () => {
+  it("delivers signed Stripe envelopes for creation, updates, deletion and invoice outcomes", async () => {
+    const { app, webhooks } = setup();
+    const captured: Array<{ raw: string; signature: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      captured.push({ raw: String(init?.body), signature: new Headers(init?.headers).get("stripe-signature")! });
+      return new Response(null, { status: 200 });
+    };
+    try {
+      seedFromConfig(new Store(), base, { webhooks: [{ url: "https://app.example.com/webhooks/stripe", events: ["*"], secret: "synthetic-signing-secret" }] }, webhooks);
+      const session = await checkout(app);
+      await app.request(`/checkout/${session.id}/complete`, { method: "POST" });
+      const { data: [sub] } = await (await app.request("/v1/subscriptions?status=all")).json();
+      const update = await app.request(`/v1/subscriptions/${sub.id}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "cancel_at_period_end=true" });
+      expect((await update.json()).cancel_at_period_end).toBe(true);
+      expect((await app.request(`/v1/invoices/${sub.latest_invoice}/pay`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payment_method: "pm_card_chargeDeclined" }) })).status).toBe(402);
+      await app.request(`/v1/invoices/${sub.latest_invoice}/pay`, { method: "POST" });
+      expect((await (await app.request(`/v1/subscriptions/${sub.id}`, { method: "DELETE" })).json()).status).toBe("canceled");
+      const events = captured.map(({ raw }) => JSON.parse(raw));
+      expect(events.map((e) => e.type)).toEqual(["customer.subscription.created", "invoice.paid", "checkout.session.completed", "customer.subscription.updated", "invoice.payment_failed", "invoice.paid", "customer.subscription.deleted"]);
+      expect(new Set(events.map((e) => e.id)).size).toBe(events.length);
+      for (const [i, event] of events.entries()) {
+        expect(event).toMatchObject({ object: "event", livemode: false, data: { object: { customer: "cus_acme" } } });
+        const { raw, signature } = captured[i];
+        const timestamp = signature.split(",")[0].slice(2);
+        const { createHmac } = await import("node:crypto");
+        expect(signature).toBe(`t=${timestamp},v1=${createHmac("sha256", "synthetic-signing-secret").update(`${timestamp}.${raw}`).digest("hex")}`);
+      }
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
