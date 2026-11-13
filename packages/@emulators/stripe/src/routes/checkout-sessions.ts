@@ -3,6 +3,7 @@ import { renderCardPage, renderCheckoutPage, escapeHtml, escapeAttr } from "@emu
 import type { CheckoutLineItem } from "@emulators/core";
 import { getStripeStore } from "../store.js";
 import { stripeId, toUnixTimestamp, parseStripeBody, stripeError, stripeList } from "../helpers.js";
+import { completeSubscription, dispatchStripeEvent } from "../subscriptions.js";
 import type { StripeCheckoutSession } from "../entities.js";
 
 const SERVICE_LABEL = "Stripe";
@@ -15,6 +16,7 @@ function formatSession(s: StripeCheckoutSession, baseUrl: string) {
     status: s.status,
     payment_status: s.payment_status,
     customer: s.customer_id,
+    subscription: s.subscription_id ?? null,
     success_url: s.success_url,
     cancel_url: s.cancel_url,
     metadata: s.metadata,
@@ -95,6 +97,9 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       }
     }
 
+    if (body.mode === "subscription" && (!body.customer || lineItems.length === 0)) {
+      return stripeError(c, 400, "invalid_request_error", "Subscription Checkout requires a customer and line_items.");
+    }
     const session = ss.checkoutSessions.insert({
       stripe_id: stripeId("cs"),
       mode: body.mode as StripeCheckoutSession["mode"],
@@ -104,6 +109,7 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       success_url: (body.success_url as string) ?? null,
       cancel_url: (body.cancel_url as string) ?? null,
       line_items: lineItems,
+      subscription_metadata: (body.subscription_data as { metadata?: Record<string, string> } | undefined)?.metadata ?? {},
       metadata: (body.metadata as Record<string, string>) ?? {},
     });
     return c.json(formatSession(session, baseUrl), 200);
@@ -225,14 +231,16 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
       return c.redirect("/checkout/" + c.req.param("id"));
     }
 
-    const updated = ss.checkoutSessions.update(session.id, { status: "complete", payment_status: "paid" })!;
+    ss.checkoutSessions.update(session.id, { status: "complete", payment_status: "paid" });
+    const subscription = session.mode === "subscription"
+      ? await completeSubscription({ app, store, webhooks, baseUrl }, session)
+      : undefined;
+    const updated = ss.checkoutSessions.update(session.id, {
+      status: "complete", payment_status: "paid",
+      ...(subscription ? { subscription_id: subscription.stripe_id } : {}),
+    })!;
 
-    await webhooks.dispatch(
-      "checkout.session.completed",
-      undefined,
-      { type: "checkout.session.completed", data: { object: formatSession(updated, baseUrl) } },
-      "stripe",
-    );
+    await dispatchStripeEvent(webhooks, "checkout.session.completed", formatSession(updated, baseUrl));
 
     if (session.success_url) {
       const url = session.success_url.replace("{CHECKOUT_SESSION_ID}", updated.stripe_id);

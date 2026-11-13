@@ -64,6 +64,29 @@ export interface StripeCheckoutSession extends Entity {
   customer_id: string | null;
   success_url: string | null;
   cancel_url: string | null;
+  subscription_id?: string;
+  subscription_metadata?: Record<string, string>;
   line_items: Array<{ price: string; quantity: number }>;
   metadata: Record<string, string>;
+}
+
+export interface StripeSubscription extends Entity {
+  stripe_id: string;
+  customer_id: string;
+  status: "active" | "canceled";
+  cancel_at_period_end: boolean;
+  current_period_start: number;
+  current_period_end: number;
+  items: Array<{ id: string; price: string; quantity: number }>;
+  metadata: Record<string, string>;
+  latest_invoice: string;
+}
+
+export interface StripeInvoice extends Entity {
+  stripe_id: string;
+  customer_id: string;
+  subscription_id: string;
+  currency: string;
+  amount: number;
+  status: "paid" | "open";
 }

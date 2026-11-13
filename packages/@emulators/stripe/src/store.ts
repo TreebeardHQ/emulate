@@ -1,5 +1,7 @@
 import { Store, type Collection } from "@emulators/core";
 import type {
+  StripeSubscription,
+  StripeInvoice,
   StripeCustomer,
   StripeProduct,
   StripePrice,
@@ -9,6 +11,8 @@ import type {
 } from "./entities.js";
 
 export interface StripeStore {
+  subscriptions: Collection<StripeSubscription>;
+  invoices: Collection<StripeInvoice>;
   customers: Collection<StripeCustomer>;
   products: Collection<StripeProduct>;
   prices: Collection<StripePrice>;
@@ -19,6 +23,8 @@ export interface StripeStore {
 
 export function getStripeStore(store: Store): StripeStore {
   return {
+    subscriptions: store.collection<StripeSubscription>("stripe.subscriptions", ["stripe_id", "customer_id"]),
+    invoices: store.collection<StripeInvoice>("stripe.invoices", ["stripe_id", "customer_id"]),
     customers: store.collection<StripeCustomer>("stripe.customers", ["stripe_id", "email"]),
     products: store.collection<StripeProduct>("stripe.products", ["stripe_id"]),
     prices: store.collection<StripePrice>("stripe.prices", ["stripe_id", "product_id"]),
