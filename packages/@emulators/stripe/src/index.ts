@@ -18,6 +18,7 @@ import { chargeRoutes } from "./routes/charges.js";
 import { productRoutes } from "./routes/products.js";
 import { priceRoutes } from "./routes/prices.js";
 import { checkoutSessionRoutes } from "./routes/checkout-sessions.js";
+import { billingPortalRoutes } from "./routes/billing-portal.js";
 import { subscriptionRoutes } from "./routes/subscriptions.js";
 import { customerSessionRoutes } from "./routes/customer-sessions.js";
 
@@ -184,6 +185,7 @@ export const stripePlugin: ServicePlugin = {
     checkoutSessionRoutes(ctx);
     customerSessionRoutes(ctx);
     subscriptionRoutes(ctx);
+    billingPortalRoutes(ctx);
   },
   seed(store: Store, baseUrl: string): void {
     seedDefaults(store, baseUrl);

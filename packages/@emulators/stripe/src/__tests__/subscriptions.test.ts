@@ -78,3 +78,26 @@ describe("subscription events", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 });
+
+describe("billing portal", () => {
+  it("returns an opaque hosted portal URL and cancels only that customer's subscription", async () => {
+    const { app } = setup();
+    const session = await checkout(app);
+    await app.request(`/checkout/${session.id}/complete`, { method: "POST" });
+    const { data: [sub] } = await (await app.request("/v1/subscriptions?status=all")).json();
+    const res = await app.request("/v1/billing_portal/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ customer: "cus_acme", return_url: "https://app.example.com/settings/billing" }) });
+    expect(res.status).toBe(200);
+    const portal = await res.json();
+    expect(portal.url).toBe(`${base}/portal/${portal.id}`);
+    const page = await (await app.request(`/portal/${portal.id}`)).text();
+    expect(page).toContain("Cancel at period end");
+    expect(page).toContain("Cancel now");
+    const scheduled = await app.request(`/portal/${portal.id}/cancel`, { method: "POST", body: new URLSearchParams({ subscription: sub.id, action: "schedule" }) });
+    expect(scheduled.status).toBe(302);
+    expect((await (await app.request(`/v1/subscriptions/${sub.id}`)).json()).cancel_at_period_end).toBe(true);
+    await app.request(`/portal/${portal.id}/cancel`, { method: "POST", body: new URLSearchParams({ subscription: sub.id, action: "cancel_now" }) });
+    expect((await (await app.request(`/v1/subscriptions/${sub.id}`)).json()).status).toBe("canceled");
+    expect((await app.request("/portal/unknown")).status).toBe(404);
+    expect((await app.request(`/portal/${portal.id}/cancel`, { method: "POST", body: new URLSearchParams({ subscription: "sub_other", action: "cancel_now" }) })).status).toBe(404);
+  });
+});
