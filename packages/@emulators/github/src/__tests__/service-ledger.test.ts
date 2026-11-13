@@ -120,4 +120,54 @@ describe("GitHub service action ledger", () => {
       await github.close();
     }
   });
+
+  it("drains an accepted webhook mutation before closing and rejects new work", async () => {
+    const github = service();
+    const originalFetch = globalThis.fetch;
+    let releaseDelivery!: (response: Response) => void;
+    let markDeliveryStarted!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => { markDeliveryStarted = resolve; });
+    try {
+      vi.stubGlobal("fetch", async () => new Response(null, { status: 200 }));
+      const hook = await github.fetch(new Request(`${base}/repos/fixture-user/project/hooks`, {
+        method: "POST", headers: jsonHeaders,
+        body: JSON.stringify({ name: "web", active: true, events: ["issues"], config: { url: "https://hooks.example.test" } }),
+      }));
+      expect(hook.status).toBe(201);
+
+      vi.stubGlobal("fetch", async () => {
+        markDeliveryStarted();
+        return new Promise<Response>((resolve) => { releaseDelivery = resolve; });
+      });
+      const acceptedMutation = github.fetch(new Request(`${base}/repos/fixture-user/project/issues`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ title: "Close barrier" }),
+      }));
+      await deliveryStarted;
+      const close = github.close();
+      let closeResolved = false;
+      void close.then(() => { closeResolved = true; });
+      await Promise.resolve();
+      expect(closeResolved).toBe(false);
+      expect(github.close()).toBe(close);
+      await expect(github.fetch(new Request(`${base}/repos/fixture-user/project/issues`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ title: "Rejected after close" }),
+      }))).rejects.toThrow("GitHub service is closing or closed");
+      await expect(github.importFixture("fixture-user/project", new Uint8Array(), { baseSha: "", refs: {} }))
+        .rejects.toThrow("GitHub service is closing or closed");
+      await expect(github.replayDelivery(1)).rejects.toThrow("GitHub service is closing or closed");
+      expect(() => github.seed({})).toThrow("GitHub service is closing or closed");
+
+      releaseDelivery(new Response(null, { status: 200 }));
+      expect((await acceptedMutation).status).toBe(201);
+      await close;
+      expect(closeResolved).toBe(true);
+      expect(github.getGitHubActionLedger()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "webhook", event: "issues", action: "opened", successful: true, status: 200 }),
+      ]));
+    } finally {
+      if (releaseDelivery) releaseDelivery(new Response(null, { status: 200 }));
+      vi.stubGlobal("fetch", originalFetch);
+      await github.close();
+    }
+  });
 });

@@ -232,7 +232,35 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
   const actions: GitHubServiceAction[] = [];
   const importedRepos = new Set<string>();
   const secretValues = () => knownSecrets(githubServer.store, githubServer.tokenMap);
-  let requestQueue = Promise.resolve();
+  let closing = false;
+  let operationCount = 0;
+  let operationQueue = Promise.resolve();
+  let closePromise: Promise<void> | undefined;
+  const pendingDispatches = new Set<Promise<void>>();
+  const pluginDispatch = githubServer.webhooks.dispatch.bind(githubServer.webhooks);
+  githubServer.webhooks.dispatch = (event, action, payload, owner, repo) => {
+    const dispatch = pluginDispatch(event, action, payload, owner, repo);
+    let trackedDispatch: Promise<void>;
+    trackedDispatch = dispatch.finally(() => pendingDispatches.delete(trackedDispatch));
+    pendingDispatches.add(trackedDispatch);
+    return trackedDispatch;
+  };
+  const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+    if (closing) return Promise.reject(new Error("GitHub service is closing or closed"));
+    operationCount += 1;
+    let release!: () => void;
+    const previous = operationQueue;
+    operationQueue = new Promise<void>((resolve) => { release = resolve; });
+    return (async () => {
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        operationCount -= 1;
+        release();
+      }
+    })();
+  };
   const stopObservingDeliveries = githubServer.webhooks.observeDeliveries((delivery) => {
     const payload = delivery.payload && typeof delivery.payload === "object"
       ? delivery.payload as Record<string, unknown>
@@ -252,15 +280,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
     });
   });
   const fetch = async (request: Request): Promise<Response> => {
-    let release!: () => void;
-    const previous = requestQueue;
-    requestQueue = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      return await fetchSerial(request);
-    } finally {
-      release();
-    }
+    return enqueue(() => fetchSerial(request));
   };
   const fetchSerial = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
@@ -315,6 +335,8 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
   return {
     fetch,
     seed(config) {
+      if (closing) throw new Error("GitHub service is closing or closed");
+      if (operationCount > 0) throw new Error("Cannot seed while GitHub service operations are active");
       if (importedRepos.size) throw new Error("Cannot change seed after importing a native Git fixture");
       const strictConfig = { ...config, strict_scopes: true };
       seedFromConfig(githubServer.store, githubServer.baseUrl, strictConfig);
@@ -329,12 +351,14 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       }
     },
     async importFixture(repoFullName, bundle, pins) {
-      if (importedRepos.has(repoFullName)) throw new Error(`Fixture repository ${repoFullName} was already imported`);
-      const repo = getGitHubStore(githubServer.store).repos.findOneBy("full_name", repoFullName);
-      if (!repo) throw new Error(`Fixture repository ${repoFullName} is not seeded`);
-      await nativeGit.importBundle(repoFullName, bundle, pins, repo.default_branch);
-      await projectNativeGit(repoFullName, githubServer.store);
-      importedRepos.add(repoFullName);
+      return enqueue(async () => {
+        if (importedRepos.has(repoFullName)) throw new Error(`Fixture repository ${repoFullName} was already imported`);
+        const repo = getGitHubStore(githubServer.store).repos.findOneBy("full_name", repoFullName);
+        if (!repo) throw new Error(`Fixture repository ${repoFullName} is not seeded`);
+        await nativeGit.importBundle(repoFullName, bundle, pins, repo.default_branch);
+        await projectNativeGit(repoFullName, githubServer.store);
+        importedRepos.add(repoFullName);
+      });
     },
     inspectGitHubState() {
       return redact(structuredClone(snapshot(githubServer.store)), secretValues());
@@ -343,23 +367,44 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       return redact(structuredClone(actions).sort((a, b) => a.sequence - b.sequence), secretValues());
     },
     async replayDelivery(deliveryId) {
-      const delivery = await githubServer.webhooks.redeliver(deliveryId);
-      if (!delivery) return undefined;
-      return {
-        id: delivery.id,
-        delivery_id: delivery.delivery_id,
-        hook_id: delivery.hook_id,
-        event: delivery.event,
-        action: delivery.action,
-        status_code: delivery.status_code,
-        success: delivery.success,
-        redelivery_of: delivery.redelivery_of,
-        redelivery_count: delivery.redelivery_count,
-      };
+      return enqueue(async () => {
+        const delivery = await githubServer.webhooks.redeliver(deliveryId);
+        if (!delivery) return undefined;
+        return {
+          id: delivery.id,
+          delivery_id: delivery.delivery_id,
+          hook_id: delivery.hook_id,
+          event: delivery.event,
+          action: delivery.action,
+          status_code: delivery.status_code,
+          success: delivery.success,
+          redelivery_of: delivery.redelivery_of,
+          redelivery_count: delivery.redelivery_count,
+        };
+      });
     },
-    async close() {
-      stopObservingDeliveries();
-      await nativeGit.close();
+    close() {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        await operationQueue;
+        const dispatchErrors: unknown[] = [];
+        while (pendingDispatches.size > 0) {
+          const results = await Promise.allSettled([...pendingDispatches]);
+          for (const result of results) if (result.status === "rejected") dispatchErrors.push(result.reason);
+        }
+        let closeError: unknown;
+        try {
+          await nativeGit.close();
+        } catch (error) {
+          closeError = error;
+        } finally {
+          stopObservingDeliveries();
+        }
+        if (dispatchErrors.length > 0) throw new AggregateError(dispatchErrors, "GitHub webhook delivery failed during service close");
+        if (closeError !== undefined) throw closeError;
+      })();
+      return closePromise;
     },
   };
 }
