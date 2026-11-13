@@ -1,13 +1,14 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createGitHubService } from "../index.js";
 
 const base = "http://localhost";
-const service = () => createGitHubService({
+const service = (appPrivateKey = "app_private_fixture") => createGitHubService({
   seed: {
     users: [{ login: "fixture-user" }],
     tokens: { "ghp_fixture_token": { login: "fixture-user", scopes: ["repo", "admin:repo_hook"] } },
     repos: [{ owner: "fixture-user", name: "project" }],
-    apps: [{ app_id: 42, slug: "review-bot", name: "Review Bot", private_key: "app_private_fixture", webhook_secret: "app_webhook_fixture" }],
+    apps: [{ app_id: 42, slug: "review-bot", name: "Review Bot", private_key: appPrivateKey, webhook_secret: "app_webhook_fixture" }],
     oauth_apps: [{ client_id: "fixture-client", client_secret: "oauth_secret_fixture", name: "Fixture OAuth", redirect_uris: [] }],
   },
 });
@@ -117,6 +118,48 @@ describe("GitHub service action ledger", () => {
       expect(github.inspectGitHubState().comments[0]?.body).not.toBe("tampered");
     } finally {
       vi.stubGlobal("fetch", originalFetch);
+      await github.close();
+    }
+  });
+
+  it("redacts only a positively validated App JWT from ledger and state exports", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const github = service(privateKeyPem);
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const unsignedJwt = [
+        Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url"),
+        Buffer.from(JSON.stringify({ iss: "42", iat: now, exp: now + 300 })).toString("base64url"),
+      ].join(".");
+      const jwt = `${unsignedJwt}.${sign("RSA-SHA256", Buffer.from(unsignedJwt), privateKey).toString("base64url")}`;
+      const appResponse = await github.fetch(new Request(`${base}/app/installations`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      }));
+      expect(appResponse.status).toBe(200);
+
+      const denied = await github.fetch(new Request(`${base}/repos/fixture-user/project/pulls/99`, {
+        method: "PATCH", headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ title: jwt }),
+      }));
+      expect(denied.status).toBeGreaterThanOrEqual(400);
+      const issue = await github.fetch(new Request(`${base}/repos/fixture-user/project/issues`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ title: "Fixture issue" }),
+      }));
+      expect(issue.status).toBe(201);
+      const comment = await github.fetch(new Request(`${base}/repos/fixture-user/project/issues/1/comments`, {
+        method: "POST", headers: jsonHeaders, body: JSON.stringify({ body: `echo ${jwt}` }),
+      }));
+      expect(comment.status).toBe(201);
+
+      const ledger = JSON.stringify(github.getGitHubActionLedger());
+      const state = github.inspectGitHubState();
+      expect(ledger.includes(jwt)).toBe(false);
+      expect(JSON.stringify(state).includes(jwt)).toBe(false);
+      const rejectedAction = github.getGitHubActionLedger().find((entry) => entry.path?.endsWith("/pulls/99"));
+      expect(rejectedAction?.input?.title).toBe("[REDACTED]");
+      expect(state.comments[0]?.body).toBe("echo [REDACTED]");
+    } finally {
       await github.close();
     }
   });

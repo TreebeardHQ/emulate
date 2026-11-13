@@ -202,11 +202,18 @@ function snapshot(store: ReturnType<typeof createServer>["store"]): GitHubStateS
 export function createGitHubService(options: GitHubServiceOptions = {}): GitHubService {
   const seedConfig = { ...(options.seed ?? {}), strict_scopes: true };
   const nativeGit = createNativeGitStore();
+  const validatedAppJwtSecrets = new Set<string>();
   const plugin: ServicePlugin = {
     ...githubPlugin,
     register(app, store, webhooks, baseUrl, tokenMap) {
       nativeGit.attach(store);
       store.setData("github.native_git", true);
+      app.use("*", async (context, next) => {
+        const authorization = context.req.header("Authorization") ?? "";
+        const bearer = /^Bearer\s+(\S+)$/i.exec(authorization)?.[1];
+        if (bearer && context.get("authApp")) validatedAppJwtSecrets.add(bearer);
+        await next();
+      });
       githubPlugin.register(app, store, webhooks, baseUrl, tokenMap);
       smartHttpRoutes({ app, store, webhooks, baseUrl, tokenMap });
     },
@@ -231,7 +238,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
   let sequence = 0;
   const actions: GitHubServiceAction[] = [];
   const importedRepos = new Set<string>();
-  const secretValues = () => knownSecrets(githubServer.store, githubServer.tokenMap);
+  const secretValues = () => [...knownSecrets(githubServer.store, githubServer.tokenMap), ...validatedAppJwtSecrets];
   let closing = false;
   let operationCount = 0;
   let operationQueue = Promise.resolve();
