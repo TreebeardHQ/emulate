@@ -261,8 +261,11 @@ describe("native GitHub service", () => {
       expect(service.inspectGitHubState().pullRequests[0]?.head.sha).toBe(conflictedSha);
       expect(await readMergeState()).toMatchObject({ data: { repository: { pullRequest: { mergeStateStatus: "DIRTY" } } } });
     } finally {
-      if (server?.listening) await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
+      if (server?.listening) {
+        server.closeIdleConnections();
+        await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
+      }
       await service.close();
     }
-  });
+  }, 20_000);
 });

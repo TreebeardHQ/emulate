@@ -59,17 +59,21 @@ export function smartHttpRoutes(context: RouteContext): void {
     }
 
     const before = receive ? await nativeGit.refs(fullName) : undefined;
-    const body = method === "POST" ? new Uint8Array(await c.req.arrayBuffer()) : new Uint8Array();
-    const response = await nativeGit.httpBackend(
+    let response = await nativeGit.httpBackend(
       fullName,
       url.pathname,
       method,
       url.searchParams.toString(),
       contentType,
       c.req.header("Git-Protocol"),
-      body,
+      method === "POST" ? c.req.raw.body : null,
+      c.req.header("Content-Length"),
       c.get("authUser")?.login ?? c.get("authApp")?.slug ?? "anonymous",
     );
+    if (receive && response.body) {
+      const bufferedStatus = await response.arrayBuffer();
+      response = new Response(bufferedStatus, { status: response.status, headers: response.headers });
+    }
     if (receive && before && response.ok) {
       const after = await nativeGit.refs(fullName);
       if (JSON.stringify(before) !== JSON.stringify(after)) {

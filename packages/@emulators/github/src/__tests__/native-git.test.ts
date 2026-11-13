@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -159,6 +160,62 @@ describe("native Git storage", () => {
     }
   });
 
+  it("streams chunked binary requests and response output, and reaps the backend group on cancellation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "github-http-stream-test-"));
+    temporaryDirectories.push(root);
+    const bin = join(root, "bin");
+    const capture = join(root, "request.bin");
+    const pidFile = join(root, "sleep.pid");
+    await mkdir(bin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    await writeFile(join(bin, "git"), `#!/bin/sh
+if [ "$1" = "http-backend" ]; then
+  cat > '${capture}'
+  sleep 30 &
+  echo $! > '${pidFile}'
+  printf 'Content-Type: application/octet-stream\\r\\n\\r\\nfirst'
+  wait
+  printf 'second'
+  exit 0
+fi
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    const store = createNativeGitStore();
+    const requestBytes = Buffer.from([0, 255, 1, 128, 10]);
+    try {
+      const result = await store.httpBackend(
+        "example/project",
+        "/example/project.git/git-upload-pack",
+        "POST",
+        "",
+        "application/x-git-upload-pack-request",
+        undefined,
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(requestBytes.subarray(0, 2));
+            controller.enqueue(requestBytes.subarray(2));
+            controller.close();
+          },
+        }),
+        undefined,
+        "fixture-user",
+      );
+      expect(result.status).toBe(200);
+      expect(await readFile(capture)).toEqual(requestBytes);
+      const reader = result.body!.getReader();
+      const first = await reader.read();
+      expect(Buffer.from(first.value!)).toEqual(Buffer.from("first"));
+      const childPid = Number((await readFile(pidFile, "utf8")).trim());
+      await reader.cancel();
+      await expectProcessExit(childPid);
+    } finally {
+      process.env.PATH = previousPath;
+      await store.close();
+    }
+  });
+
   it("serves native clone, exact SHA fetch, push, and binary contents over smart HTTP", async () => {
     const fixture = await makeBundle();
     const store = createNativeGitStore();
@@ -168,8 +225,6 @@ describe("native Git storage", () => {
     }, "main");
     const server = createServer(async (request, response) => {
       const url = new URL(request.url ?? "/", "http://localhost");
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const result = await store.httpBackend(
         "example/project",
         url.pathname,
@@ -177,11 +232,19 @@ describe("native Git storage", () => {
         url.searchParams.toString(),
         String(request.headers["content-type"] ?? ""),
         typeof request.headers["git-protocol"] === "string" ? request.headers["git-protocol"] : undefined,
-        Buffer.concat(chunks),
+        Readable.toWeb(request),
+        typeof request.headers["content-length"] === "string" ? request.headers["content-length"] : undefined,
         "fixture-user",
       );
       response.writeHead(result.status, Object.fromEntries(result.headers));
-      response.end(Buffer.from(await result.arrayBuffer()));
+      if (!result.body) {
+        response.end();
+        return;
+      }
+      for await (const chunk of Readable.fromWeb(result.body)) {
+        if (!response.write(chunk)) await new Promise<void>((resolve) => response.once("drain", resolve));
+      }
+      response.end();
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     temporaryDirectories.push(fixture.root);
@@ -220,3 +283,17 @@ describe("native Git storage", () => {
     }
   });
 });
+
+async function expectProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Process ${pid} remained alive after backend cancellation`);
+}

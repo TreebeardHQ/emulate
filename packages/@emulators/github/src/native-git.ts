@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
+import { Readable, Writable } from "node:stream";
 import type { Store } from "@emulators/core";
 
 const execFileAsync = promisify(execFile);
@@ -48,6 +49,7 @@ export interface NativeGitTreeEntry {
 export class NativeGitStore {
   private root?: string;
   private closed = false;
+  private readonly activeHttpProcesses = new Set<{ kill: () => void; cancelBody: () => Promise<void>; exited: Promise<number> }>();
   private readonly initializedRepos = new Set<string>();
 
   attach(store: Store): this {
@@ -145,12 +147,7 @@ export class NativeGitStore {
     const gitDir = this.gitDir(fullName);
     return new Promise<boolean>((resolveMerge, reject) => {
       const child = spawn("git", ["--git-dir", gitDir, "merge-tree", "--write-tree", baseSha, headSha], {
-        env: {
-          PATH: process.env.PATH,
-          HOME: gitDir,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-        },
+        env: this.gitEnvironment(gitDir),
         stdio: ["ignore", "ignore", "pipe"],
       });
       const stderr: Buffer[] = [];
@@ -258,7 +255,8 @@ export class NativeGitStore {
     query: string,
     contentType: string,
     protocol: string | undefined,
-    body: Uint8Array,
+    body: ReadableStream<Uint8Array> | null,
+    contentLength: string | undefined,
     remoteUser: string,
   ): Promise<Response> {
     const [owner, repo] = this.parseName(fullName);
@@ -267,44 +265,85 @@ export class NativeGitStore {
     if (!pathInfo.startsWith(expectedPrefix) || pathInfo.includes("..") || pathInfo.includes("\\")) {
       return new Response("Not Found", { status: 404 });
     }
-    const env: NodeJS.ProcessEnv = {
-      PATH: process.env.PATH,
+    const env = this.gitEnvironment(root, {
       GIT_PROJECT_ROOT: root,
       GIT_HTTP_EXPORT_ALL: "1",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      HOME: root,
       PATH_INFO: pathInfo,
       REQUEST_METHOD: method,
       QUERY_STRING: query,
       CONTENT_TYPE: contentType,
-      CONTENT_LENGTH: String(body.byteLength),
       REMOTE_USER: remoteUser,
-    };
-    if (protocol) env.HTTP_GIT_PROTOCOL = protocol;
-    const output = await new Promise<Buffer>((resolveOutput, reject) => {
-      const child = spawn("git", ["http-backend"], { env, stdio: ["pipe", "pipe", "pipe"] });
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      child.stdout.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
-      child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(Buffer.concat(stderr).toString("utf8").trim() || `git http-backend exited ${code}`));
-          return;
-        }
-        resolveOutput(Buffer.concat(stdout));
-      });
-      child.stdin.end(body);
     });
-    const separator = output.indexOf(Buffer.from("\r\n\r\n"));
-    const separatorLength = 4;
-    const fallbackSeparator = separator === -1 ? output.indexOf(Buffer.from("\n\n")) : separator;
-    const actualSeparatorLength = separator === -1 ? 2 : separatorLength;
-    if (fallbackSeparator === -1) return new Response(output, { status: 502 });
-    const headerText = output.subarray(0, fallbackSeparator).toString("latin1");
-    const responseBody = output.subarray(fallbackSeparator + actualSeparatorLength);
+    if (contentLength !== undefined) env.CONTENT_LENGTH = contentLength;
+    if (protocol) env.HTTP_GIT_PROTOCOL = protocol;
+    this.assertOpen();
+    const child = spawn("git", ["http-backend"], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const stderr: Buffer[] = [];
+    let stderrSize = 0;
+    child.stderr.on("data", (chunk: Buffer) => {
+      const copy = Buffer.from(chunk);
+      stderr.push(copy);
+      stderrSize += copy.length;
+      while (stderrSize > 64 * 1024 && stderr.length) stderrSize -= stderr.shift()!.length;
+    });
+    const exited = new Promise<number>((resolveExit, rejectExit) => {
+      child.once("error", rejectExit);
+      child.once("close", (code) => resolveExit(code ?? 1));
+    });
+    const killProcessGroup = () => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        if (!(error && typeof error === "object" && "code" in error && error.code === "ESRCH")) throw error;
+      }
+    };
+    const requestAbort = new AbortController();
+    const cancelBody = async () => { requestAbort.abort(); };
+    const activeProcess = { kill: killProcessGroup, cancelBody, exited };
+    this.activeHttpProcesses.add(activeProcess);
+    void exited.finally(() => this.activeHttpProcesses.delete(activeProcess)).catch(() => undefined);
+    if (body) void exited.then(cancelBody).catch(() => undefined);
+    const requestFinished = body
+      ? body.pipeTo(Writable.toWeb(child.stdin), { signal: requestAbort.signal }).catch((error) => {
+          killProcessGroup();
+          throw error;
+        })
+      : Promise.resolve().then(() => child.stdin.end());
+    const outputReader = Readable.toWeb(child.stdout).getReader();
+    const prefix: Uint8Array[] = [];
+    let prefixSize = 0;
+    let bodyFirstChunk = new Uint8Array();
+    let cgiHeaderBuffer = Buffer.alloc(0);
+    let headerEnd = -1;
+    let separatorLength = 0;
+    const maxHeaderBytes = 64 * 1024;
+    try {
+      while (headerEnd < 0) {
+        const { done, value } = await outputReader.read();
+        if (done) throw new Error("git http-backend closed before sending CGI headers");
+        prefix.push(value);
+        prefixSize += value.length;
+        const joined = Buffer.concat(prefix.map((chunk) => Buffer.from(chunk)), prefixSize);
+        const crlfEnd = joined.indexOf(Buffer.from("\r\n\r\n"));
+        const lfEnd = joined.indexOf(Buffer.from("\n\n"));
+        headerEnd = crlfEnd >= 0 ? crlfEnd : lfEnd;
+        separatorLength = crlfEnd >= 0 ? 4 : 2;
+        if (headerEnd >= 0) {
+          if (headerEnd > maxHeaderBytes) throw new Error("git http-backend CGI headers exceeded the size limit");
+          cgiHeaderBuffer = joined.subarray(0, headerEnd);
+          bodyFirstChunk = joined.subarray(headerEnd + separatorLength);
+          prefix.length = 0;
+        } else if (prefixSize > maxHeaderBytes) {
+          throw new Error("git http-backend CGI headers exceeded the size limit");
+        }
+      }
+    } catch (error) {
+      killProcessGroup();
+      await exited.catch(() => 1);
+      throw error;
+    }
+    const headerText = cgiHeaderBuffer.toString("latin1");
     const headers = new Headers();
     let status = 200;
     for (const line of headerText.split(/\r?\n/)) {
@@ -315,6 +354,38 @@ export class NativeGitStore {
       if (name.toLowerCase() === "status") status = Number(value.slice(0, 3)) || 200;
       else headers.append(name, value);
     }
+    let first = true;
+    const responseBody = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          if (first) {
+            first = false;
+            if (bodyFirstChunk.length) {
+              controller.enqueue(bodyFirstChunk);
+              return;
+            }
+          }
+          const { done, value } = await outputReader.read();
+          if (!done) {
+            controller.enqueue(value);
+            return;
+          }
+          await requestFinished;
+          const code = await exited;
+          if (code !== 0) throw new Error(Buffer.concat(stderr).toString("utf8").trim() || `git http-backend exited ${code}`);
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      async cancel() {
+        await cancelBody();
+        killProcessGroup();
+        outputReader.releaseLock();
+        await exited.catch(() => 1);
+      },
+    });
+    void requestFinished.catch(() => undefined);
     return new Response(responseBody, { status, headers });
   }
 
@@ -376,7 +447,13 @@ export class NativeGitStore {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    const children = [...this.activeHttpProcesses];
+    for (const child of children) child.kill();
+    await Promise.all(children.map((child) => child.cancelBody()));
+    const exits = await Promise.allSettled(children.map((child) => child.exited));
     if (this.root) await rm(this.root, { recursive: true, force: true });
+    const errors = exits.filter((exit): exit is PromiseRejectedResult => exit.status === "rejected");
+    if (errors.length) throw new AggregateError(errors.map((exit) => exit.reason), "Git HTTP backend processes failed during close");
   }
 
   private async ensureRepoDir(fullName: string): Promise<string> {
@@ -418,12 +495,7 @@ export class NativeGitStore {
     this.assertOpen();
     try {
       const result = await execFileAsync("git", ["--git-dir", gitDir, ...args], {
-        env: {
-          PATH: process.env.PATH,
-          HOME: gitDir,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-        },
+        env: this.gitEnvironment(gitDir),
         encoding: options.encoding === "buffer" ? "buffer" : "utf8",
         maxBuffer: 128 * 1024 * 1024,
       });
@@ -434,6 +506,16 @@ export class NativeGitStore {
       }
       throw error;
     }
+  }
+
+  private gitEnvironment(home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+    return {
+      PATH: process.env.PATH,
+      HOME: home,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      ...extra,
+    };
   }
 
   private assertOpen(): void {
