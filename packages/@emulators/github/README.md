@@ -1,8 +1,12 @@
 # @emulators/github
 
-Fully stateful GitHub API emulation. Creates, updates, and deletes persist in memory and affect related entities.
+Fully stateful GitHub API emulation. Creates, updates, and deletes affect related entities.
 
 Part of [emulate](https://github.com/vercel-labs/emulate) — local drop-in replacement services for CI and no-network sandboxes.
+
+## Native Git service
+
+`createGitHubService` adds in-process Git smart HTTP backed by a native bare repository. It requires the system `git` executable on the service process `PATH`. Import a Git bundle with `service.importFixture(...)` and provide the pinned base SHA and allowed refs; fixture import reads the supplied bytes and does not contact a remote Git host.
 
 ## Install
 
@@ -90,6 +94,7 @@ npm install @emulators/github
 ### Branches & Git Data
 - Branches: list, get, protection CRUD (status checks, PR reviews, enforce admins)
 - Refs: get, match, create, update, delete
+- Native service: Git smart HTTP clone, exact-SHA fetch, and push. REST Git object and ref reads project from the bare repository; write Git data through smart HTTP.
 - Commits: get, create
 - Trees: get (with recursive), create (with inline content)
 - Blobs: get, create
