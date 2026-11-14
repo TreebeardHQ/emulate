@@ -218,6 +218,26 @@ describe("PR review eval API contracts", () => {
     });
     expect(denied.status).toBe(403);
 
+    const reviewer = getGitHubStore(store).users.findOneBy("login", "reviewer[bot]")!;
+    const collaborator = getGitHubStore(store).collaborators.insert({
+      repo_id: repo.id,
+      user_id: reviewer.id,
+      permission: "pull",
+    });
+    const readerWrite = await app.request(`${base}/repos/octocat/hello-world/statuses/${pr.head.sha}`, {
+      method: "POST",
+      headers: headers("reviewer"),
+      body: JSON.stringify({ state: "success", context: "ci/read-only" }),
+    });
+    expect(readerWrite.status).toBe(403);
+    getGitHubStore(store).collaborators.update(collaborator.id, { permission: "maintain" });
+    const maintainerWrite = await app.request(`${base}/repos/octocat/hello-world/statuses/${pr.head.sha}`, {
+      method: "POST",
+      headers: headers("reviewer"),
+      body: JSON.stringify({ state: "success", context: "ci/maintainer" }),
+    });
+    expect(maintainerWrite.status).toBe(201);
+
     const rootResponse = await app.request(`${base}/repos/octocat/hello-world/pulls/${pr.number}/comments`, {
       method: "POST", headers: headers("reviewer"), body: JSON.stringify({ body: "Review comment" }),
     });

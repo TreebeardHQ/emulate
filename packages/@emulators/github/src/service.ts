@@ -261,6 +261,7 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
     return (async () => {
       await previous;
       try {
+        if (closing) throw new Error("GitHub service is closing or closed");
         return await operation();
       } finally {
         operationCount -= 1;
@@ -394,22 +395,30 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
       if (closePromise) return closePromise;
       closing = true;
       closePromise = (async () => {
+        const closeErrors: unknown[] = [];
+        try {
+          await nativeGit.stopHttp();
+        } catch (error) {
+          closeErrors.push(error);
+        }
         await operationQueue;
+        try {
+          await nativeGit.close();
+        } catch (error) {
+          closeErrors.push(error);
+        }
         const dispatchErrors: unknown[] = [];
         while (pendingDispatches.size > 0) {
           const results = await Promise.allSettled([...pendingDispatches]);
           for (const result of results) if (result.status === "rejected") dispatchErrors.push(result.reason);
         }
-        let closeError: unknown;
-        try {
-          await nativeGit.close();
-        } catch (error) {
-          closeError = error;
-        } finally {
-          stopObservingDeliveries();
+        stopObservingDeliveries();
+        if (dispatchErrors.length > 0 && closeErrors.length > 0) {
+          throw new AggregateError([...dispatchErrors, ...closeErrors], "GitHub webhook delivery and native Git cleanup failed during service close");
         }
         if (dispatchErrors.length > 0) throw new AggregateError(dispatchErrors, "GitHub webhook delivery failed during service close");
-        if (closeError !== undefined) throw closeError;
+        if (closeErrors.length === 1) throw closeErrors[0];
+        if (closeErrors.length > 1) throw new AggregateError(closeErrors, "Native Git cleanup failed during service close");
       })();
       return closePromise;
     },

@@ -57,6 +57,22 @@ async function makeBundle() {
 }
 
 describe("native Git storage", () => {
+  it("lets an active fixture import finish after smart HTTP shutdown", async () => {
+    const fixture = await makeBundle();
+    const store = createNativeGitStore();
+    try {
+      const imported = store.importBundle("example/project", fixture.bundle, {
+        baseSha: fixture.baseSha,
+        refs: { "refs/heads/main": fixture.baseSha },
+      }, "main");
+      await store.stopHttp();
+      await expect(imported).resolves.toContain("example/project.git");
+      expect(store.hasRepo("example/project")).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
   it("ignores inherited Git config overrides while creating and reading canonical repositories", async () => {
     const fixture = await makeBundle();
     const names = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;

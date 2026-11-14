@@ -30,6 +30,7 @@ export interface NativeGitCommit {
 }
 
 export interface NativeGitChangedFile {
+  sha: string;
   path: string;
   previousPath?: string;
   status: string;
@@ -49,6 +50,7 @@ export interface NativeGitTreeEntry {
 export class NativeGitStore {
   private root?: string;
   private closed = false;
+  private httpClosing = false;
   private readonly activeHttpProcesses = new Set<{ kill: () => Promise<void>; cancelBody: () => Promise<void>; exited: Promise<number> }>();
   private readonly initializedRepos = new Set<string>();
 
@@ -194,6 +196,7 @@ export class NativeGitStore {
   }
 
   async changedFiles(fullName: string, baseSha: string, headSha: string): Promise<NativeGitChangedFile[]> {
+    const mergeBase = (await this.run(fullName, ["merge-base", baseSha, headSha])) as string;
     const output = (await this.run(fullName, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--name-status", "-z", `${baseSha}...${headSha}`], {
       encoding: "buffer",
     })) as Buffer;
@@ -205,15 +208,19 @@ export class NativeGitStore {
       const firstPath = fields[index++]!;
       const secondPath = rename ? fields[index++] : undefined;
       const path = secondPath ?? firstPath;
-      const statOutput = (await this.run(fullName, ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--numstat", `${baseSha}...${headSha}`, "--", path], {
+      const pathspec = rename ? [firstPath, path] : [path];
+      const statOutput = (await this.run(fullName, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--find-renames", "--numstat", `${baseSha}...${headSha}`, "--", ...pathspec], {
         encoding: "buffer",
       })) as Buffer;
       const stat = statOutput.toString("utf8").split("\t");
-      const patchOutput = (await this.run(fullName, ["diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames", `${baseSha}...${headSha}`, "--", path], {
+      const patchOutput = (await this.run(fullName, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--unified=3", "--find-renames", `${baseSha}...${headSha}`, "--", ...pathspec], {
         encoding: "buffer",
       })) as Buffer;
       const patch = patchOutput.toString("utf8");
+      const blobSpec = status[0] === "D" ? `${mergeBase}:${firstPath}` : `${headSha}:${path}`;
+      const sha = (await this.run(fullName, ["rev-parse", "--verify", blobSpec])) as string;
       files.push({
+        sha,
         path,
         previousPath: rename ? firstPath : undefined,
         status: status[0] === "R" ? "renamed" : status[0] === "A" ? "added" : status[0] === "D" ? "removed" : "modified",
@@ -276,7 +283,7 @@ export class NativeGitStore {
     });
     if (contentLength !== undefined) env.CONTENT_LENGTH = contentLength;
     if (protocol) env.HTTP_GIT_PROTOCOL = protocol;
-    this.assertOpen();
+    this.assertHttpOpen();
     const child = spawn("git", ["http-backend"], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     const stderr: Buffer[] = [];
     let stderrSize = 0;
@@ -476,12 +483,29 @@ export class NativeGitStore {
 
   async close(): Promise<void> {
     if (this.closed) return;
+    let closeError: unknown;
+    try {
+      await this.stopHttp();
+    } catch (error) {
+      closeError = error;
+    }
     this.closed = true;
+    try {
+      if (this.root) await rm(this.root, { recursive: true, force: true });
+    } catch (error) {
+      if (closeError !== undefined) throw new AggregateError([closeError, error], "Native Git store cleanup failed");
+      throw error;
+    }
+    if (closeError !== undefined) throw closeError;
+  }
+
+  async stopHttp(): Promise<void> {
+    if (this.httpClosing) return;
+    this.httpClosing = true;
     const children = [...this.activeHttpProcesses];
     await Promise.all(children.map((child) => child.kill()));
     await Promise.all(children.map((child) => child.cancelBody()));
     const exits = await Promise.allSettled(children.map((child) => child.exited));
-    if (this.root) await rm(this.root, { recursive: true, force: true });
     const errors = exits.filter((exit): exit is PromiseRejectedResult => exit.status === "rejected");
     if (errors.length) throw new AggregateError(errors.map((exit) => exit.reason), "Git HTTP backend processes failed during close");
   }
@@ -550,6 +574,11 @@ export class NativeGitStore {
 
   private assertOpen(): void {
     if (this.closed) throw new Error("Native Git store is closed");
+  }
+
+  private assertHttpOpen(): void {
+    this.assertOpen();
+    if (this.httpClosing) throw new Error("Native Git HTTP is closing or closed");
   }
 }
 

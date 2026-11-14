@@ -30,6 +30,7 @@ import {
 } from "../helpers.js";
 import { findOrCreateCommit } from "../git-helpers.js";
 import { getNativeGitStore } from "../native-git.js";
+import type { NativeGitChangedFile } from "../native-git.js";
 
 function acceptsPullRequestDiff(accept: string | undefined): boolean {
   if (!accept) return false;
@@ -406,7 +407,12 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     const headBranch = getOrCreateBranch(gh, headRepo, headRef);
     const baseBranch = getOrCreateBranch(gh, repo, baseRef);
     const nativeGit = store.getData<boolean>("github.native_git") === true ? getNativeGitStore(store) : undefined;
+    if (nativeGit && !nativeGit.hasRepo(headRepo.full_name)) {
+      throw new ApiError(503, "Native Git repository is not initialized");
+    }
     const mergeable = nativeGit ? await nativeGit.canMerge(headRepo.full_name, baseBranch.sha, headBranch.sha) : true;
+    const nativeHistory = nativeGit ? await nativeGit.history(headRepo.full_name, baseBranch.sha, headBranch.sha) : undefined;
+    const nativeFiles = nativeGit ? await nativeGit.changedFiles(headRepo.full_name, baseBranch.sha, headBranch.sha) : undefined;
 
     const num = getNextIssueNumber(gh, repo.id);
     const now = timestamp();
@@ -432,7 +438,9 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     } as Omit<GitHubIssue, "id" | "created_at" | "updated_at">);
     gh.issues.update(issueRow.id, { node_id: generateNodeId("Issue", issueRow.id) });
 
-    const commitCount = countCommitsBetween(gh, headRepo, headBranch.sha, baseBranch.sha);
+    const commitCount = nativeHistory?.length ?? countCommitsBetween(gh, headRepo, headBranch.sha, baseBranch.sha);
+    const additions = nativeFiles?.reduce((sum, file) => sum + file.additions, 0) ?? 0;
+    const deletions = nativeFiles?.reduce((sum, file) => sum + file.deletions, 0) ?? 0;
 
     const prRow = gh.pullRequests.insert({
       node_id: "",
@@ -460,10 +468,10 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       mergeable_state: mergeable ? "clean" : "dirty",
       comments: 0,
       review_comments: 0,
-      commits: Math.max(1, commitCount),
-      additions: 0,
-      deletions: 0,
-      changed_files: 0,
+      commits: commitCount,
+      additions,
+      deletions,
+      changed_files: nativeFiles?.length ?? 0,
       draft,
       requested_reviewer_ids: [],
       requested_team_ids: [],
@@ -575,9 +583,18 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       patch.base_repo_id = repo.id;
       if (store.getData<boolean>("github.native_git") === true) {
         const nativeGit = getNativeGitStore(store);
+        if (!nativeGit.hasRepo(repo.full_name)) {
+          throw new ApiError(503, "Native Git repository is not initialized");
+        }
         const mergeable = await nativeGit.canMerge(repo.full_name, bb.sha, pr.head_sha);
+        const history = await nativeGit.history(repo.full_name, bb.sha, pr.head_sha);
+        const files = await nativeGit.changedFiles(repo.full_name, bb.sha, pr.head_sha);
         patch.mergeable = mergeable;
         patch.mergeable_state = mergeable ? "clean" : "dirty";
+        patch.commits = history.length;
+        patch.additions = files.reduce((sum, file) => sum + file.additions, 0);
+        patch.deletions = files.reduce((sum, file) => sum + file.deletions, 0);
+        patch.changed_files = files.length;
       }
     }
     if (typeof body.draft === "boolean") {
@@ -780,7 +797,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     });
   });
 
-  app.get("/repos/:owner/:repo/pulls/:pull_number/commits", (c) => {
+  app.get("/repos/:owner/:repo/pulls/:pull_number/commits", async (c) => {
     const owner = c.req.param("owner")!;
     const repoName = c.req.param("repo")!;
     const repo = lookupRepo(gh, owner, repoName);
@@ -796,7 +813,19 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     const headRepo = gh.repos.get(pr.head_repo_id);
     if (!headRepo) throw notFoundResponse();
 
-    const chain = walkCommitsToBase(gh, headRepo, pr.head_sha, pr.base_sha);
+    const nativeGit = store.getData<boolean>("github.native_git") === true ? getNativeGitStore(store) : undefined;
+    if (nativeGit && !nativeGit.hasRepo(headRepo.full_name)) {
+      throw new ApiError(503, "Native Git repository is not initialized");
+    }
+    const nativeHistory = nativeGit ? await nativeGit.history(headRepo.full_name, pr.base_sha, pr.head_sha) : undefined;
+    const projectedCommits = gh.commits.findBy("repo_id", headRepo.id);
+    const chain = nativeHistory
+      ? nativeHistory.map((item) => {
+          const commit = projectedCommits.find((candidate) => candidate.sha === item.sha);
+          if (!commit) throw new ApiError(503, `Native Git commit ${item.sha} is missing from the REST projection`);
+          return commit;
+        })
+      : walkCommitsToBase(gh, headRepo, pr.head_sha, pr.base_sha);
     const { page, per_page } = parsePagination(c);
     const total = chain.length;
     setLinkHeader(c, total, page, per_page);
@@ -806,7 +835,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     return c.json(slice.map((commit) => formatCommitApi(commit, headRepo, baseUrl)));
   });
 
-  app.get("/repos/:owner/:repo/pulls/:pull_number/files", (c) => {
+  app.get("/repos/:owner/:repo/pulls/:pull_number/files", async (c) => {
     const owner = c.req.param("owner")!;
     const repoName = c.req.param("repo")!;
     const repo = lookupRepo(gh, owner, repoName);
@@ -819,26 +848,40 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
     const pr = findPull(gh, repo.id, pullNumber);
     if (!pr) throw notFoundResponse();
 
+    const headRepo = gh.repos.get(pr.head_repo_id);
+    if (!headRepo) throw notFoundResponse();
+    const nativeGit = store.getData<boolean>("github.native_git") === true ? getNativeGitStore(store) : undefined;
+    if (nativeGit && !nativeGit.hasRepo(headRepo.full_name)) {
+      throw new ApiError(503, "Native Git repository is not initialized");
+    }
+    const nativeFiles = nativeGit ? await nativeGit.changedFiles(headRepo.full_name, pr.base_sha, pr.head_sha) : undefined;
     const { page, per_page } = parsePagination(c);
-    const n = pr.changed_files;
-    const stubNames = Array.from({ length: n }, (_, i) => `file${i + 1}.ts`);
-    const total = stubNames.length;
+    const files: NativeGitChangedFile[] = nativeFiles ?? Array.from({ length: pr.changed_files }, (_, i) => ({
+      sha: generateSha(),
+      path: `file${i + 1}.ts`,
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "",
+    }));
+    const total = files.length;
     setLinkHeader(c, total, page, per_page);
     const start = (page - 1) * per_page;
-    const pageNames = stubNames.slice(start, start + per_page);
+    const pageFiles = files.slice(start, start + per_page);
 
     return c.json(
-      pageNames.map((filename, i) => ({
-        sha: generateSha(),
-        filename,
-        status: "modified",
-        additions: 1,
-        deletions: 0,
-        changes: 1,
-        blob_url: `${baseUrl}/${repo.full_name}/blob/${pr.head_sha}/${filename}`,
-        raw_url: `${baseUrl}/${repo.full_name}/raw/${pr.head_sha}/${filename}`,
-        contents_url: `${baseUrl}/repos/${repo.full_name}/contents/${encodeURIComponent(filename)}?ref=${pr.head_ref}`,
-        patch: "",
+      pageFiles.map((file) => ({
+        sha: file.sha,
+        filename: file.path,
+        ...(file.previousPath ? { previous_filename: file.previousPath } : {}),
+        status: file.status,
+        additions: file.additions,
+        deletions: file.deletions,
+        changes: file.additions + file.deletions,
+        blob_url: `${baseUrl}/${repo.full_name}/blob/${pr.head_sha}/${file.path}`,
+        raw_url: `${baseUrl}/${repo.full_name}/raw/${pr.head_sha}/${file.path}`,
+        contents_url: `${baseUrl}/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${pr.head_ref}`,
+        ...(file.patch ? { patch: file.patch } : {}),
       })),
     );
   });

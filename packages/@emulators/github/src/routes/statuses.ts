@@ -2,7 +2,7 @@ import type { RouteContext } from "@emulators/core";
 import { ApiError, parseJsonBody, parsePagination, setLinkHeader } from "@emulators/core";
 import { getGitHubStore } from "../store.js";
 import { lookupRepo, formatUser } from "../helpers.js";
-import { assertAuthenticatedActor, assertRepoPermission, notFoundResponse, ownerLoginOf } from "../route-helpers.js";
+import { assertAuthenticatedActor, assertRepoContentsWrite, assertRepoPermission, notFoundResponse, ownerLoginOf } from "../route-helpers.js";
 
 const validStates = new Set(["error", "failure", "pending", "success"]);
 
@@ -48,8 +48,13 @@ export function commitStatusRoutes({ app, store, baseUrl, webhooks }: RouteConte
   app.post("/repos/:owner/:repo/statuses/:sha", async (c) => {
     const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
     if (!repo) throw notFoundResponse();
-    const actor = assertAuthenticatedActor(gh, c.get("authUser"));
-    assertRepoPermission(gh, c.get("authUser"), repo, "statuses", "write");
+    const authUser = c.get("authUser");
+    const actor = assertAuthenticatedActor(gh, authUser);
+    if (authUser?.installation) {
+      assertRepoPermission(gh, authUser, repo, "statuses", "write");
+    } else {
+      assertRepoContentsWrite(gh, authUser, repo);
+    }
     const sha = c.req.param("sha")!;
     const hasCommit = gh.commits.findBy("repo_id", repo.id).some((commit) => commit.sha === sha);
     if (!hasCommit) throw notFoundResponse();
