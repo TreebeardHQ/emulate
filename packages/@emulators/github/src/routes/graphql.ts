@@ -6,6 +6,22 @@ import { assertRepoPermission, assertAuthenticatedActor } from "../route-helpers
 
 type MergeGateVariables = { owner?: unknown; repo?: unknown; number?: unknown };
 
+const PROTECTION_READ_POLICY_KEY = "github.fixture.protectionReadDeniedRepos";
+
+export function setProtectionReadDenied(store: RouteContext["store"], repoFullName: string, denied: boolean): boolean {
+  const deniedRepos = store.getData<Set<string>>(PROTECTION_READ_POLICY_KEY) ?? new Set<string>();
+  const wasDenied = deniedRepos.has(repoFullName);
+  if (denied === wasDenied) return false;
+  if (denied) deniedRepos.add(repoFullName);
+  else deniedRepos.delete(repoFullName);
+  store.setData(PROTECTION_READ_POLICY_KEY, deniedRepos);
+  return true;
+}
+
+function protectionReadDenied(store: RouteContext["store"], repoFullName: string): boolean {
+  return store.getData<Set<string>>(PROTECTION_READ_POLICY_KEY)?.has(repoFullName) ?? false;
+}
+
 /** Implements the one concrete GraphQL projection used by the PR review merge gate. */
 export function githubGraphqlRoutes({ app, store }: RouteContext): void {
   const gh = getGitHubStore(store);
@@ -54,6 +70,10 @@ export function githubGraphqlRoutes({ app, store }: RouteContext): void {
         data: null,
         errors: [{ type: "FORBIDDEN", extensions: { code: "FORBIDDEN" }, message: "Resource not accessible by integration" }],
       });
+    }
+
+    if (protectionReadDenied(store, repository.full_name)) {
+      return c.json({ message: "Resource not accessible by integration" }, 403);
     }
 
     const pr = gh.pullRequests

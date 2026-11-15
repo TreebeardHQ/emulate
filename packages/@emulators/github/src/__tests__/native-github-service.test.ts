@@ -66,6 +66,111 @@ async function makeFixture(advanceBase = false, literalFilenames = false) {
 }
 
 describe("native GitHub service", () => {
+  it("denies only imported-fixture MergeGate protection reads through the service control seam", async () => {
+    const fixture = await makeFixture();
+    const service = createGitHubService({
+      seed: {
+        users: [{ login: "fixture-user", name: "Fixture User", email: "fixture@example.com" }],
+        tokens: { "fixture-token": { login: "fixture-user", scopes: ["repo"] } },
+        repos: [
+          { owner: "fixture-user", name: "project", private: true, default_branch: "main", auto_init: false },
+          { owner: "fixture-user", name: "unimported", private: true, default_branch: "main", auto_init: false },
+        ],
+      },
+    });
+    try {
+      await service.importFixture("fixture-user/project", fixture.bundle, {
+        baseSha: fixture.baseSha,
+        refs: { "refs/heads/main": fixture.baseSha, "refs/heads/review": fixture.headSha },
+      });
+      await expect(service.setProtectionReadPolicy("fixture-user/unimported", true)).rejects.toThrow(
+        "Protection-read policy requires an imported fixture repository",
+      );
+      await expect(service.setProtectionReadPolicy("other/project", true)).rejects.toThrow(
+        "Protection-read policy requires an imported fixture repository",
+      );
+
+      const prResponse = await service.fetch(new Request("http://localhost/repos/fixture-user/project/pulls", {
+        method: "POST",
+        headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Merge gate fixture", head: "review", base: "main" }),
+      }));
+      expect(prResponse.status).toBe(201);
+      const pr = await prResponse.json() as { number: number };
+      const protectionResponse = await service.fetch(new Request(
+        "http://localhost/repos/fixture-user/project/branches/main/protection",
+        {
+          method: "PUT",
+          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            required_status_checks: { strict: true, contexts: ["fixture / proofs"], checks: [{ context: "fixture / proofs", app_id: 777 }] },
+            required_pull_request_reviews: { required_approving_review_count: 1 },
+          }),
+        },
+      ));
+      expect(protectionResponse.status).toBe(200);
+      const mergeGateQuery = "query MergeGate($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$number){ state isDraft headRefOid author{login} headRepository{nameWithOwner} mergeStateStatus baseRef{branchProtectionRule{requiredApprovingReviewCount requiredStatusCheckContexts requiredStatusChecks{context app{databaseId}}}} } } }";
+      const mergeGateRequest = () => new Request("http://localhost/graphql", {
+        method: "POST",
+        headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: mergeGateQuery,
+          variables: { owner: "fixture-user", repo: "project", number: pr.number },
+        }),
+      });
+
+      const ready = await service.fetch(mergeGateRequest());
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toMatchObject({
+        data: { repository: { pullRequest: { state: "OPEN", baseRef: { branchProtectionRule: {
+          requiredApprovingReviewCount: 1,
+          requiredStatusCheckContexts: ["fixture / proofs"],
+          requiredStatusChecks: [{ context: "fixture / proofs", app: { databaseId: 777 } }],
+        } } } } },
+      });
+      const stateBeforeDenial = service.inspectGitHubState();
+
+      expect(await service.setProtectionReadPolicy("fixture-user/project", true)).toEqual({
+        repoFullName: "fixture-user/project", denied: true, changed: true,
+      });
+      expect(await service.setProtectionReadPolicy("fixture-user/project", true)).toEqual({
+        repoFullName: "fixture-user/project", denied: true, changed: false,
+      });
+      const denied = await service.fetch(mergeGateRequest());
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({ message: "Resource not accessible by integration" });
+      expect(service.inspectGitHubState()).toEqual(stateBeforeDenial);
+      expect(service.getGitHubActionLedger().at(-1)).toMatchObject({
+        type: "request", method: "POST", path: "/graphql", actor: null, status: 403, successful: false,
+      });
+
+      const restPull = await service.fetch(new Request(`http://localhost/repos/fixture-user/project/pulls/${pr.number}`, {
+        headers: { Authorization: "Bearer fixture-token" },
+      }));
+      expect(restPull.status).toBe(200);
+      const nativeGitRef = await service.fetch(new Request(
+        "http://localhost/fixture-user/project.git/info/refs?service=git-upload-pack",
+        { headers: { Authorization: `Basic ${Buffer.from("fixture-user:fixture-token").toString("base64")}` } },
+      ));
+      expect(nativeGitRef.status).toBe(200);
+
+      expect(await service.setProtectionReadPolicy("fixture-user/project", false)).toEqual({
+        repoFullName: "fixture-user/project", denied: false, changed: true,
+      });
+      const restored = await service.fetch(mergeGateRequest());
+      expect(restored.status).toBe(200);
+      expect(await restored.json()).toMatchObject({
+        data: { repository: { pullRequest: { state: "OPEN", baseRef: { branchProtectionRule: {
+          requiredApprovingReviewCount: 1,
+          requiredStatusCheckContexts: ["fixture / proofs"],
+          requiredStatusChecks: [{ context: "fixture / proofs", app: { databaseId: 777 } }],
+        } } } } },
+      });
+    } finally {
+      await service.close();
+    }
+  });
+
   it("enforces strict smart HTTP auth and keeps Git pushes coherent with REST PR state", async () => {
     const fixture = await makeFixture();
     const service = createGitHubService({

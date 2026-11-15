@@ -9,6 +9,7 @@ import type { NativeGitPins } from "./native-git.js";
 import { projectNativeGit } from "./native-projection.js";
 import { smartHttpRoutes } from "./routes/smart-http.js";
 import { getRevokedTokens } from "./tokens.js";
+import { setProtectionReadDenied } from "./routes/graphql.js";
 
 export interface GitHubServiceOptions {
   baseUrl?: string;
@@ -58,6 +59,11 @@ export interface GitHubService {
   fetch(request: Request): Promise<Response>;
   seed(config: GitHubSeedConfig): void;
   importFixture(repoFullName: string, bundle: Uint8Array, pins: NativeGitPins): Promise<void>;
+  setProtectionReadPolicy(repoFullName: string, denied: boolean): Promise<{
+    repoFullName: string;
+    denied: boolean;
+    changed: boolean;
+  }>;
   inspectGitHubState(): GitHubStateSnapshot;
   getGitHubActionLedger(): GitHubServiceAction[];
   replayDelivery(deliveryId: number): Promise<Pick<WebhookDelivery, "id" | "delivery_id" | "hook_id" | "event" | "action" | "status_code" | "success" | "redelivery_of" | "redelivery_count"> | undefined>;
@@ -366,6 +372,15 @@ export function createGitHubService(options: GitHubServiceOptions = {}): GitHubS
         await nativeGit.importBundle(repoFullName, bundle, pins, repo.default_branch);
         await projectNativeGit(repoFullName, githubServer.store);
         importedRepos.add(repoFullName);
+      });
+    },
+    async setProtectionReadPolicy(repoFullName, denied) {
+      return enqueue(async () => {
+        if (!importedRepos.has(repoFullName)) {
+          throw new Error("Protection-read policy requires an imported fixture repository");
+        }
+        const changed = setProtectionReadDenied(githubServer.store, repoFullName, denied);
+        return { repoFullName, denied, changed };
       });
     },
     inspectGitHubState() {
