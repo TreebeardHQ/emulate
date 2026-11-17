@@ -96,10 +96,11 @@ function hasValidAppJwtClaims(payload: unknown): payload is { iss: string | numb
   ) return false;
 
   const now = Math.floor(Date.now() / 1000);
+  // GitHub recommends backdating iat by one minute while setting exp ten minutes ahead.
   return issuedAt <= now + APP_JWT_CLOCK_SKEW_SECONDS &&
     expiresAt > now &&
     expiresAt <= now + APP_JWT_MAX_LIFETIME_SECONDS &&
-    expiresAt - issuedAt <= APP_JWT_MAX_LIFETIME_SECONDS;
+    expiresAt - issuedAt <= APP_JWT_MAX_LIFETIME_SECONDS + APP_JWT_CLOCK_SKEW_SECONDS;
 }
 
 export function authMiddleware(tokens: TokenMap, appKeyResolver?: AppKeyResolver, fallbackUser?: AuthFallback) {

@@ -114,13 +114,14 @@ describe("authMiddleware", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const now = Math.floor(Date.now() / 1000);
-    const valid = { iss: "42", iat: now - 60, exp: now + 540 };
+    const valid = { iss: "42", iat: now - 60, exp: now + 600 };
     const invalidClaims = [
       { iat: now - 60, exp: now + 540 },
       { iss: "42", iat: now - 60 },
       { iss: "42", exp: now + 540 },
-      { ...valid, exp: now + 541 },
-      { ...valid, iat: now + 61, exp: now + 600 },
+      { ...valid, iat: now - 61 },
+      { ...valid, iat: now, exp: now + 660 },
+      { ...valid, iat: now + 120 },
       { ...valid, exp: now - 1 },
     ];
 

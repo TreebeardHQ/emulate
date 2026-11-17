@@ -42,7 +42,7 @@ function createTestApp(seedConfig?: Parameters<typeof seedFromConfig>[2]) {
 function createAppJwt(appId: string, privateKey: string): string {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
-  const payload = { iat: nowSeconds - 60, exp: nowSeconds + 9 * 60, iss: appId };
+  const payload = { iat: nowSeconds - 60, exp: nowSeconds + 10 * 60, iss: appId };
   const unsigned = `${base64UrlJson(header)}.${base64UrlJson(payload)}`;
   return `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url")}`;
 }
@@ -745,7 +745,7 @@ describe("GitHub App installation token flow", () => {
     expect(gh.commits.findBy("repo_id", fork.id)).toHaveLength(commitCount);
   });
 
-  it("accepts a valid App JWT and mints an installation token", async () => {
+  it("mints an installation token with a ten-minute App JWT backdated by one minute", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const privateKeyPem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
     const { app } = createTestApp({
