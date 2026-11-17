@@ -491,6 +491,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       "opened",
       {
         action: "opened",
+        number: pr.number,
         pull_request: prFmt,
         repository: formatRepo(repo, gh, baseUrl),
         sender: formatUser(actor, baseUrl),
@@ -619,6 +620,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         "closed",
         {
           action: "closed",
+          number: fresh.number,
           pull_request: prFmt,
           repository: formatRepo(repo, gh, baseUrl),
           sender: formatUser(actor, baseUrl),
@@ -632,6 +634,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         "reopened",
         {
           action: "reopened",
+          number: fresh.number,
           pull_request: prFmt,
           repository: formatRepo(repo, gh, baseUrl),
           sender: formatUser(actor, baseUrl),
@@ -645,6 +648,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         "ready_for_review",
         {
           action: "ready_for_review",
+          number: fresh.number,
           pull_request: prFmt,
           repository: formatRepo(repo, gh, baseUrl),
           sender: formatUser(actor, baseUrl),
@@ -658,6 +662,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
         "edited",
         {
           action: "edited",
+          number: fresh.number,
           pull_request: prFmt,
           repository: formatRepo(repo, gh, baseUrl),
           sender: formatUser(actor, baseUrl),
@@ -782,6 +787,7 @@ export function pullsRoutes({ app, store, webhooks, baseUrl }: RouteContext): vo
       "closed",
       {
         action: "closed",
+        number: mergedPr.number,
         pull_request: { ...prFmt, merged: true },
         repository: formatRepo(repo, gh, baseUrl),
         sender: formatUser(actor, baseUrl),

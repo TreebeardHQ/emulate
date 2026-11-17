@@ -303,7 +303,8 @@ describe("webhook installation enrichment", () => {
     expect(body.installation).toBeUndefined();
   });
 
-  it("includes installation in pull_request webhook on merge", async () => {
+  it("signs pull_request opened and closed webhooks with the top-level PR number", async () => {
+    const secret = "test-pull-request-webhook-secret";
     const { app, webhooks } = createTestApp({
       users: [{ login: "octocat" }],
       repos: [{ owner: "octocat", name: "hello-world" }],
@@ -331,6 +332,7 @@ describe("webhook installation enrichment", () => {
       active: true,
       owner: "octocat",
       repo: "hello-world",
+      secret,
     });
 
     const createRes = await app.request(`${base}/repos/octocat/hello-world/pulls`, {
@@ -339,10 +341,28 @@ describe("webhook installation enrichment", () => {
       body: JSON.stringify({ title: "feat: test", head: "feature", base: "main" }),
     });
     expect(createRes.status).toBe(201);
+    const prData = (await createRes.json()) as { number: number };
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+    const expectPullRequestDelivery = (action: "opened" | "closed", merged: boolean) => {
+      const [, init] = mockFetch.mock.calls[0]!;
+      const rawBody = (init as RequestInit).body as string;
+      const headers = (init as RequestInit).headers as Record<string, string>;
+      expect(headers["X-GitHub-Event"]).toBe("pull_request");
+      expect(headers["X-Hub-Signature-256"]).toBe(
+        `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`,
+      );
+      expect(JSON.parse(rawBody)).toMatchObject({
+        action,
+        number: prData.number,
+        pull_request: { number: prData.number, merged },
+        installation: { id: 1 },
+      });
+    };
+    expectPullRequestDelivery("opened", false);
 
     mockFetch.mockClear();
 
-    const prData = (await createRes.json()) as { number: number };
     const mergeRes = await app.request(`${base}/repos/octocat/hello-world/pulls/${prData.number}/merge`, {
       method: "PUT",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -350,13 +370,8 @@ describe("webhook installation enrichment", () => {
     });
     expect(mergeRes.status).toBe(200);
 
-    expect(mockFetch).toHaveBeenCalled();
-    const [, init] = mockFetch.mock.calls[0]!;
-    const body = JSON.parse((init as RequestInit).body as string);
-    expect(body.action).toBe("closed");
-    expect(body.pull_request.merged).toBe(true);
-    expect(body.installation).toBeDefined();
-    expect(body.installation.id).toBe(1);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    expectPullRequestDelivery("closed", true);
   });
 
   it("respects selected repository_selection", async () => {
