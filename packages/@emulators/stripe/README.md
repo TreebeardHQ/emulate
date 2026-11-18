@@ -72,12 +72,16 @@ stripe:
   products:
     - name: Pro Plan
   prices:
-    - product: Pro Plan
+    - product_name: Pro Plan
       unit_amount: 2000
       currency: usd
       recurring:
         interval: month
 ```
+
+Recurring prices accept `month` or `year`. Monthly subscription periods remain 30 days. Yearly prices use the same UTC date next year, with February 29 clamped to February 28.
+
+The portal switches single-item subscriptions between active recurring prices in the same currency. An interval change starts a new term immediately in classic mode. Every price change creates a full-price paid invoice and emits `customer.subscription.updated` and `invoice.paid`; prorations and unused-time credits are not modeled. A price change within the same interval preserves the term.
 
 ## Links
 

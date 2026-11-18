@@ -22,6 +22,7 @@ export interface StripePrice extends Entity {
   currency: string;
   unit_amount: number | null;
   type: "one_time" | "recurring";
+  recurring: { interval: "month" | "year"; interval_count: 1 } | null;
   active: boolean;
   metadata: Record<string, string>;
 }

@@ -19,7 +19,7 @@ function formatPrice(p: StripePrice) {
     currency: p.currency,
     unit_amount: p.unit_amount,
     type: p.type,
-    recurring: p.type === "recurring" ? { interval: "month", interval_count: 1 } : null,
+    recurring: p.recurring,
     active: p.active,
     metadata: p.metadata,
     created: toUnixTimestamp(p.created_at),
@@ -70,12 +70,24 @@ export function priceRoutes({ app, store, webhooks }: RouteContext): void {
         "product",
       );
     }
+    let recurring: StripePrice["recurring"] = null;
+    if (body.recurring) {
+      if (
+        typeof body.recurring !== "object" ||
+        !("interval" in body.recurring) ||
+        (body.recurring.interval !== "month" && body.recurring.interval !== "year")
+      ) {
+        return stripeError(c, 400, "invalid_request_error", "recurring.interval must be month or year");
+      }
+      recurring = { interval: body.recurring.interval, interval_count: 1 };
+    }
     const price = ss.prices.insert({
       stripe_id: stripeId("price"),
       product_id: body.product as string,
       currency: (body.currency as string).toLowerCase(),
       unit_amount: (body.unit_amount as number) ?? null,
-      type: body.recurring ? "recurring" : "one_time",
+      type: recurring ? "recurring" : "one_time",
+      recurring,
       active: (body.active as boolean) ?? true,
       metadata: (body.metadata as Record<string, string>) ?? {},
     });

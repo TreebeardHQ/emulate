@@ -71,7 +71,7 @@ export function formatSubscription(sub: StripeSubscription, ss: StripeStore, exp
             currency: price.currency,
             unit_amount: price.unit_amount,
             type: "recurring",
-            recurring: { interval: "month", interval_count: 1 },
+            recurring: price.recurring,
             product: expand.includes("items.data.price.product")
               ? { id: product.stripe_id, object: "product", name: product.name, active: product.active }
               : price.product_id,
@@ -80,6 +80,30 @@ export function formatSubscription(sub: StripeSubscription, ss: StripeStore, exp
       }),
     },
   };
+}
+
+export function subscriptionPeriodEnd(start: number, interval: "month" | "year"): number {
+  if (interval === "month") return start + 30 * 24 * 60 * 60;
+  const end = new Date(start * 1000);
+  const month = end.getUTCMonth();
+  end.setUTCFullYear(end.getUTCFullYear() + 1);
+  // Stripe clamps a leap-day anniversary to the last day of February.
+  if (end.getUTCMonth() !== month) end.setUTCDate(0);
+  return end.getTime() / 1000;
+}
+
+export function createPaidInvoice(sub: StripeSubscription, ss: StripeStore): StripeInvoice {
+  return ss.invoices.insert({
+    stripe_id: sub.latest_invoice,
+    customer_id: sub.customer_id,
+    subscription_id: sub.stripe_id,
+    status: "paid",
+    currency: ss.prices.findOneBy("stripe_id", sub.items[0].price)!.currency,
+    amount: sub.items.reduce(
+      (sum, item) => sum + (ss.prices.findOneBy("stripe_id", item.price)!.unit_amount ?? 0) * item.quantity,
+      0,
+    ),
+  });
 }
 
 export async function completeSubscription(
@@ -94,22 +118,15 @@ export async function completeSubscription(
     status: "active",
     cancel_at_period_end: false,
     current_period_start: start,
-    current_period_end: start + 30 * 24 * 60 * 60,
+    current_period_end: subscriptionPeriodEnd(
+      start,
+      ss.prices.findOneBy("stripe_id", session.line_items[0].price)!.recurring!.interval,
+    ),
     items: session.line_items.map((item) => ({ id: stripeId("si"), ...item })),
     metadata: session.subscription_metadata,
     latest_invoice: stripeId("in"),
   });
-  const invoice = ss.invoices.insert({
-    stripe_id: sub.latest_invoice,
-    customer_id: sub.customer_id,
-    subscription_id: sub.stripe_id,
-    status: "paid",
-    currency: ss.prices.findOneBy("stripe_id", session.line_items[0].price)!.currency,
-    amount: session.line_items.reduce(
-      (sum, item) => sum + (ss.prices.findOneBy("stripe_id", item.price)!.unit_amount ?? 0) * item.quantity,
-      0,
-    ),
-  });
+  const invoice = createPaidInvoice(sub, ss);
   await dispatchStripeEvent(ctx.webhooks, "customer.subscription.created", formatSubscription(sub, ss));
   await dispatchStripeEvent(ctx.webhooks, "invoice.paid", formatInvoice(invoice));
   return sub;

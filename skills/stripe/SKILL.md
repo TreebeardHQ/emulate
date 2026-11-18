@@ -165,7 +165,7 @@ stripe:
       secret: whsec_test
 ```
 
-The `product_name` field in prices links to the product by name. Use `events: ['*']` to receive all webhook events, or specify individual event types.
+The `product_name` field in prices links to the product by name. Set `recurring: { interval: "month" }` or `recurring: { interval: "year" }` for a recurring price. Use `events: ['*']` to receive all webhook events, or specify individual event types.
 
 ## API Endpoints
 
@@ -241,7 +241,7 @@ curl -X POST http://localhost:4000/v1/checkout/sessions/cs_xxx/expire
 
 The session's `url` field points to a hosted checkout page at `/checkout/cs_xxx`. Clicking "Pay" on that page completes the session, fires the `checkout.session.completed` webhook, and redirects to `success_url`. The `{CHECKOUT_SESSION_ID}` template in `success_url` is replaced with the actual session ID.
 
-For subscriptions, create the session with `mode=subscription` and recurring price IDs. Completing the hosted session creates one active subscription and one paid invoice, then sends `customer.subscription.created` and `invoice.paid` events alongside `checkout.session.completed`. The subscription period is fixed at 30 days. The emulator does not advance periods or generate renewal invoices. If the create request includes `Idempotency-Key`, replaying the same request returns its original result; reusing that key with a different request returns a conflict.
+For subscriptions, create the session with `mode=subscription` and recurring price IDs. Completing the hosted session creates one active subscription and one paid invoice, then sends `customer.subscription.created` and `invoice.paid` events alongside `checkout.session.completed`. Monthly subscription periods remain 30 days. Yearly prices use the same UTC date next year, with February 29 clamped to February 28. The emulator does not advance periods or generate renewal invoices. If the create request includes `Idempotency-Key`, replaying the same request returns its original result; reusing that key with a different request returns a conflict.
 
 ### Subscriptions
 
@@ -256,6 +256,8 @@ curl "http://localhost:4000/v1/subscriptions?customer=cus_xxx&status=all&limit=1
 ```
 
 ### Billing portal
+
+The portal switches single-item subscriptions between active recurring prices in the same currency. An interval change starts a new term immediately in classic mode. Every price change creates a full-price paid invoice and emits `customer.subscription.updated` and `invoice.paid`; prorations and unused-time credits are not modeled. A price change within the same interval preserves the term.
 
 Create a hosted portal session with `POST /v1/billing_portal/sessions`, passing the customer and return URL. The portal offers schedule-cancel, which updates the subscription to cancel at the end of its current period, and cancel-now, which cancels it immediately. These actions emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
 

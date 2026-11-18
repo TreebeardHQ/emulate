@@ -2,7 +2,7 @@
 title: "Stripe"
 ---
 
-Stripe API emulation with customers, payment methods, customer sessions, payment intents, charges, products, prices, checkout sessions, subscriptions, and invoices. Hosted Checkout and the billing portal support local payment and subscription flows. This is a limited emulator: subscription periods are fixed at 30 days, and no renewal engine advances them or creates renewal invoices.
+Stripe API emulation with customers, payment methods, customer sessions, payment intents, charges, products, prices, checkout sessions, subscriptions, and invoices. Hosted Checkout and the billing portal support local payment and subscription flows. Monthly subscription periods remain 30 days. Yearly prices use the same UTC date next year, with February 29 clamped to February 28. No renewal engine advances periods or creates renewal invoices.
 
 API keys are accepted without checks by default. Set `stripe.strict_scopes: true` in seed config to require a known key on `/v1` routes: a key from the top-level `tokens` config, or one listed in `stripe.api_keys`. The Next.js and Nuxt adapters don't read top-level `tokens`, so there strict mode accepts only `stripe.api_keys`. Send the key as the HTTP Basic username or a bearer token: a request without a key returns `401` with `You did not provide an API key.` and an unknown key returns `401` with `Invalid API Key provided`, both as `invalid_request_error`. Hosted checkout pages stay public.
 
@@ -58,7 +58,9 @@ API keys are accepted without checks by default. Set `stripe.strict_scopes: true
 - `GET /checkout/:id` — hosted checkout page (HTML)
 - `POST /checkout/:id/complete` — complete payment flow
 
-For `mode=subscription`, completing Checkout creates one active subscription and a paid invoice. The subscription period is 30 days. The emulator does not process renewals.
+Prices accept `recurring.interval` as `month` or `year` in seed config and `POST /v1/prices`.
+
+For `mode=subscription`, completing Checkout creates one active subscription and a paid invoice. Monthly subscription periods remain 30 days. Yearly prices use the same UTC date next year, with February 29 clamped to February 28. The emulator does not process renewals.
 
 ## Subscriptions
 
@@ -79,6 +81,8 @@ These actions emit `customer.subscription.updated` and `customer.subscription.de
 Passing `payment_method=pm_card_chargeDeclined` leaves the invoice open, emits `invoice.payment_failed`, and returns HTTP `402`. Other payment methods mark it paid and emit `invoice.paid`.
 
 ## Billing portal
+
+The portal switches single-item subscriptions between active recurring prices in the same currency. An interval change starts a new term immediately in classic mode. Every price change creates a full-price paid invoice and emits `customer.subscription.updated` and `invoice.paid`; prorations and unused-time credits are not modeled. A price change within the same interval preserves the term.
 
 - `POST /v1/billing_portal/sessions` — create a hosted portal session
 

@@ -1,7 +1,13 @@
 import { renderCardPage, escapeHtml, escapeAttr, type Entity, type RouteContext } from "@emulators/core";
 import { getStripeStore } from "../store.js";
 import { stripeId, parseStripeBody, stripeError } from "../helpers.js";
-import { dispatchStripeEvent, formatSubscription } from "../subscriptions.js";
+import {
+  createPaidInvoice,
+  dispatchStripeEvent,
+  formatInvoice,
+  formatSubscription,
+  subscriptionPeriodEnd,
+} from "../subscriptions.js";
 
 interface PortalSession extends Entity {
   stripe_id: string;
@@ -44,6 +50,18 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
         <input type="hidden" name="subscription" value="${escapeAttr(sub.stripe_id)}">
         <button class="inspector-action" name="action" value="schedule">Cancel at period end</button>
         <button class="inspector-action" name="action" value="cancel_now">Cancel now</button>
+      </form>
+      <form method="post" action="${escapeAttr(baseUrl)}/portal/${escapeAttr(portal.stripe_id)}/update">
+        <input type="hidden" name="subscription" value="${escapeAttr(sub.stripe_id)}">
+        <select name="price" aria-label="Subscription price">${ss.prices
+          .all()
+          .filter((price) => price.active && price.recurring && price.stripe_id !== sub.items[0].price)
+          .map(
+            (price) =>
+              `<option value="${escapeAttr(price.stripe_id)}">${escapeHtml(ss.products.findOneBy("stripe_id", price.product_id)!.name)}: ${escapeHtml(price.currency.toUpperCase())} ${((price.unit_amount ?? 0) / 100).toFixed(2)} / ${price.recurring!.interval}</option>`,
+          )
+          .join("")}</select>
+        <button class="inspector-action" type="submit">Update subscription</button>
       </form>`
           }</div>`,
       )
@@ -56,6 +74,47 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
         "Stripe",
       ),
     );
+  });
+  app.post("/portal/:id/update", async (c) => {
+    const portal = portals.findOneBy("stripe_id", c.req.param("id"));
+    if (!portal) return c.notFound();
+    const fields = new URLSearchParams(await c.req.text());
+    const sub = ss.subscriptions.findOneBy("stripe_id", fields.get("subscription") ?? "");
+    if (!sub || sub.customer_id !== portal.customer) return c.notFound();
+    if (sub.status === "canceled") return c.redirect(portal.return_url);
+    const price = ss.prices.findOneBy("stripe_id", fields.get("price") ?? "");
+    if (!price?.active || !price.recurring || sub.items.length !== 1) {
+      return stripeError(
+        c,
+        400,
+        "invalid_request_error",
+        "Select an active recurring price for a single-item subscription",
+      );
+    }
+    const item = sub.items[0];
+    if (item.price === price.stripe_id) return c.redirect(portal.return_url);
+    const previousPrice = ss.prices.findOneBy("stripe_id", item.price)!;
+    if (price.currency !== previousPrice.currency) {
+      return stripeError(c, 400, "invalid_request_error", "The subscription currency cannot change");
+    }
+    const start = Math.floor(Date.now() / 1000);
+    const intervalChanged = previousPrice.recurring!.interval !== price.recurring.interval;
+    const updated = ss.subscriptions.update(sub.id, {
+      items: [{ ...item, price: price.stripe_id }],
+      cancel_at_period_end: false,
+      latest_invoice: stripeId("in"),
+      ...(intervalChanged
+        ? {
+            current_period_start: start,
+            current_period_end: subscriptionPeriodEnd(start, price.recurring.interval),
+          }
+        : {}),
+    })!;
+    // Prorations and unused-time credits are not modeled; invoice the full new price.
+    const invoice = createPaidInvoice(updated, ss);
+    await dispatchStripeEvent(webhooks, "customer.subscription.updated", formatSubscription(updated, ss));
+    await dispatchStripeEvent(webhooks, "invoice.paid", formatInvoice(invoice));
+    return c.redirect(portal.return_url);
   });
   app.post("/portal/:id/cancel", async (c) => {
     const portal = portals.findOneBy("stripe_id", c.req.param("id"));
