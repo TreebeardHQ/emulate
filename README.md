@@ -920,6 +920,8 @@ The `issue_comment` webhook includes `issue.pull_request` for pull request conve
 - `POST /repos/:owner/:repo/pulls/:number/reviews/:id/events` - submit
 - `PUT /repos/:owner/:repo/pulls/:number/reviews/:id/dismissals` - dismiss
 
+Creating a pending or submitted review returns HTTP 200.
+
 When creating a review on a native Git repository, inline comments with a line and no `side` use the right side of the diff. The emulator validates the anchor against the selected commit.
 
 Authors can post `COMMENT` reviews on their own pull requests. An `APPROVE` or `REQUEST_CHANGES` self-review returns HTTP 422 with the corresponding GitHub refusal message.

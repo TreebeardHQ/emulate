@@ -178,6 +178,8 @@ The `issue_comment` webhook includes `issue.pull_request` for pull request conve
 - `POST /repos/:owner/:repo/pulls/:number/reviews/:id/events` - submit
 - `PUT /repos/:owner/:repo/pulls/:number/reviews/:id/dismissals` - dismiss
 
+A successful `POST /repos/:owner/:repo/pulls/:number/reviews` returns HTTP 200 for both pending and submitted reviews.
+
 When creating a review on a native Git repository, an omitted inline comment `side` defaults to `RIGHT`. Supply `LEFT` for a deleted line. The emulator validates the path and line against the selected commit's diff and returns HTTP 422 for an invalid anchor or explicit side.
 
 Creating a submitted review or submitting a pending review returns the corresponding HTTP 422 message for a self-review. `APPROVE` returns `Review Can not approve your own pull request`. `REQUEST_CHANGES` returns `Review Can not request changes on your own pull request`. Authors can submit `COMMENT` on their own pull requests.

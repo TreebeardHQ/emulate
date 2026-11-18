@@ -349,7 +349,7 @@ describe("native GitHub service", () => {
         { path: "review.txt", line: 1, body: "comment with default side" },
         { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
       ]);
-      expect(validReview.status).toBe(201);
+      expect(validReview.status).toBe(200);
       const posted = service.inspectGitHubState();
       const [postedReview] = posted.reviews;
       if (!postedReview) throw new Error("Expected a submitted review");
@@ -380,7 +380,7 @@ describe("native GitHub service", () => {
       expect(afterEdits.comments).toEqual(posted.comments);
 
       const pending = await postReview(reviewsUrl, { body: "A pending review" });
-      expect(pending.status).toBe(201);
+      expect(pending.status).toBe(200);
       const pendingReview: { id: number } = await pending.json();
       const editedPending = await putReview(pendingReview.id, "Updated pending review");
       expect(editedPending.status).toBe(200);

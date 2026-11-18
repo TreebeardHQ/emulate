@@ -398,6 +398,8 @@ curl -X POST http://localhost:4001/repos/octocat/hello-world/pulls/1/reviews \
   -d '{"event": "APPROVE", "body": "LGTM"}'
 ```
 
+Expect HTTP 200 when review creation succeeds, including when you omit `event` to create a pending review.
+
 For inline comments submitted with a native Git review, omit `side` to use `RIGHT`, or specify `LEFT` for a deleted line. Use a path and line from the selected commit's diff.
 
 Use `COMMENT` to submit a review on a pull request you authored. Self-submitted `APPROVE` and `REQUEST_CHANGES` return HTTP 422 with distinct GitHub refusal messages.

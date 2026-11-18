@@ -269,7 +269,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
 
     const json = formatReview(review, gh, baseUrl);
     if (!json) throw notFoundResponse();
-    return c.json(json, 201);
+    return c.json(json);
   });
 
   app.get("/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id", (c) => {
