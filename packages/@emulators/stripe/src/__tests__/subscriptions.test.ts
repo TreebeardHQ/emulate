@@ -61,6 +61,7 @@ describe("subscription Checkout", () => {
       price: { id: "price_starter" },
     });
     expect(sub.items.data[0].current_period_end).toBeGreaterThan(sub.items.data[0].current_period_start);
+    expect(sub.billing_cycle_anchor).toBe(sub.items.data[0].current_period_start);
     const detail = await (await app.request(`/v1/subscriptions/${sub.id}?expand[]=latest_invoice`)).json();
     expect(detail.latest_invoice).toMatchObject({
       object: "invoice",

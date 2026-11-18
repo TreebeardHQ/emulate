@@ -45,6 +45,7 @@ export function formatSubscription(sub: StripeSubscription, ss: StripeStore, exp
     object: "subscription",
     customer: sub.customer_id,
     status: sub.status,
+    billing_cycle_anchor: sub.billing_cycle_anchor,
     cancel_at_period_end: sub.cancel_at_period_end,
     cancel_at: sub.cancel_at_period_end ? sub.current_period_end : null,
     created: toUnixTimestamp(sub.created_at),
@@ -117,6 +118,7 @@ export async function completeSubscription(
     customer_id: session.customer_id!,
     status: "active",
     cancel_at_period_end: false,
+    billing_cycle_anchor: start,
     current_period_start: start,
     current_period_end: subscriptionPeriodEnd(
       start,

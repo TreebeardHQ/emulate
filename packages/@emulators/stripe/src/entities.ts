@@ -76,6 +76,7 @@ export interface StripeSubscription extends Entity {
   customer_id: string;
   status: "active" | "past_due" | "canceled";
   cancel_at_period_end: boolean;
+  billing_cycle_anchor: number;
   current_period_start: number;
   current_period_end: number;
   items: Array<{ id: string; price: string; quantity: number }>;

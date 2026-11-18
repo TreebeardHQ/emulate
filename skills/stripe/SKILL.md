@@ -257,7 +257,7 @@ curl "http://localhost:4000/v1/subscriptions?customer=cus_xxx&status=all&limit=1
 
 ### Billing portal
 
-The portal switches single-item subscriptions between active recurring prices in the same currency. An interval change starts a new term immediately in classic mode. Every price change creates a full-price paid invoice and emits `customer.subscription.updated` and `invoice.paid`; prorations and unused-time credits are not modeled. A price change within the same interval preserves the term.
+The portal switches single-item subscriptions between active recurring prices in the same currency. An interval change starts a new term immediately and invoices the full new price; prorations are not modeled. Every price change creates a full-price paid invoice, clears any scheduled cancellation, and emits `customer.subscription.updated` and `invoice.paid`. The subscription's `billing_cycle_anchor` is the start of its first term and does not change on a switch. A price change within the same interval preserves the term.
 
 Create a hosted portal session with `POST /v1/billing_portal/sessions`, passing the customer and return URL. The portal offers schedule-cancel, which updates the subscription to cancel at the end of its current period, and cancel-now, which cancels it immediately. These actions emit `customer.subscription.updated` and `customer.subscription.deleted`, respectively.
 

@@ -97,10 +97,14 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
     if (price.currency !== previousPrice.currency) {
       return stripeError(c, 400, "invalid_request_error", "The subscription currency cannot change");
     }
+    if (!previousPrice.recurring) {
+      return stripeError(c, 400, "invalid_request_error", "The subscription's current price is not recurring");
+    }
     const start = Math.floor(Date.now() / 1000);
-    const intervalChanged = previousPrice.recurring!.interval !== price.recurring.interval;
+    const intervalChanged = previousPrice.recurring.interval !== price.recurring.interval;
     const updated = ss.subscriptions.update(sub.id, {
       items: [{ ...item, price: price.stripe_id }],
+      // A switch replaces the plan, so a scheduled cancellation is cleared.
       cancel_at_period_end: false,
       latest_invoice: stripeId("in"),
       ...(intervalChanged
