@@ -106,13 +106,24 @@ export function checkoutSessionRoutes({ app, store, webhooks, baseUrl }: RouteCo
             `line_items[${i}][price]`,
           );
         }
-        if (!ss.prices.findOneBy("stripe_id", li.price)) {
+        const price = ss.prices.findOneBy("stripe_id", li.price);
+        if (!price) {
           return stripeError(
             c,
             400,
             "invalid_request_error",
             `No such price: '${li.price}'`,
             "resource_missing",
+            `line_items[${i}][price]`,
+          );
+        }
+        if (body.mode === "subscription" && !price.recurring) {
+          return stripeError(
+            c,
+            400,
+            "invalid_request_error",
+            `The price specified is not a recurring price: '${li.price}'. Subscription mode requires recurring prices.`,
+            undefined,
             `line_items[${i}][price]`,
           );
         }

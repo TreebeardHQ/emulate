@@ -35,6 +35,11 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
       url: `${baseUrl}/portal/${portal.stripe_id}`,
     });
   });
+  // Prices a subscription can switch to: active, recurring, and in its current currency.
+  const switchablePrices = (sub: { items: Array<{ price: string }> }) => {
+    const currency = ss.prices.findOneBy("stripe_id", sub.items[0].price)!.currency;
+    return ss.prices.all().filter((price) => price.active && price.recurring && price.currency === currency);
+  };
   app.get("/portal/:id", (c) => {
     const portal = portals.findOneBy("stripe_id", c.req.param("id"));
     if (!portal) return c.notFound();
@@ -53,9 +58,8 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
       </form>
       <form method="post" action="${escapeAttr(baseUrl)}/portal/${escapeAttr(portal.stripe_id)}/update">
         <input type="hidden" name="subscription" value="${escapeAttr(sub.stripe_id)}">
-        <select name="price" aria-label="Subscription price">${ss.prices
-          .all()
-          .filter((price) => price.active && price.recurring && price.stripe_id !== sub.items[0].price)
+        <select name="price" aria-label="Subscription price">${switchablePrices(sub)
+          .filter((price) => price.stripe_id !== sub.items[0].price)
           .map(
             (price) =>
               `<option value="${escapeAttr(price.stripe_id)}">${escapeHtml(ss.products.findOneBy("stripe_id", price.product_id)!.name)}: ${escapeHtml(price.currency.toUpperCase())} ${((price.unit_amount ?? 0) / 100).toFixed(2)} / ${price.recurring!.interval}</option>`,
@@ -82,26 +86,21 @@ export function billingPortalRoutes({ app, store, webhooks, baseUrl }: RouteCont
     const sub = ss.subscriptions.findOneBy("stripe_id", fields.get("subscription") ?? "");
     if (!sub || sub.customer_id !== portal.customer) return c.notFound();
     if (sub.status === "canceled") return c.redirect(portal.return_url);
-    const price = ss.prices.findOneBy("stripe_id", fields.get("price") ?? "");
-    if (!price?.active || !price.recurring || sub.items.length !== 1) {
+    const price =
+      sub.items.length === 1 ? switchablePrices(sub).find((p) => p.stripe_id === fields.get("price")) : undefined;
+    if (!price?.recurring) {
       return stripeError(
         c,
         400,
         "invalid_request_error",
-        "Select an active recurring price for a single-item subscription",
+        "Select an active recurring price in the subscription's currency for a single-item subscription",
       );
     }
     const item = sub.items[0];
     if (item.price === price.stripe_id) return c.redirect(portal.return_url);
     const previousPrice = ss.prices.findOneBy("stripe_id", item.price)!;
-    if (price.currency !== previousPrice.currency) {
-      return stripeError(c, 400, "invalid_request_error", "The subscription currency cannot change");
-    }
-    if (!previousPrice.recurring) {
-      return stripeError(c, 400, "invalid_request_error", "The subscription's current price is not recurring");
-    }
     const start = Math.floor(Date.now() / 1000);
-    const intervalChanged = previousPrice.recurring.interval !== price.recurring.interval;
+    const intervalChanged = previousPrice.recurring!.interval !== price.recurring.interval;
     const updated = ss.subscriptions.update(sub.id, {
       items: [{ ...item, price: price.stripe_id }],
       // A switch replaces the plan, so a scheduled cancellation is cleared.

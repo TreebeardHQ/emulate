@@ -19,6 +19,21 @@ function setup() {
         unit_amount: 10000,
         recurring: { interval: "month" },
       },
+      { id: "price_once", product_name: "Starter", currency: "usd", unit_amount: 500 },
+      {
+        id: "price_eur_year",
+        product_name: "Starter",
+        currency: "eur",
+        unit_amount: 100000,
+        recurring: { interval: "year" },
+      },
+      {
+        id: "price_year",
+        product_name: "Starter",
+        currency: "usd",
+        unit_amount: 100000,
+        recurring: { interval: "year" },
+      },
     ],
   });
   return { app, store, webhooks };
@@ -271,5 +286,54 @@ describe("subscription reset and terminal state", () => {
       });
       expect((await (await app.request(`/v1/subscriptions/${sub.id}`)).json()).status).toBe("canceled");
     }
+  });
+});
+
+describe("recurring price rules", () => {
+  it("rejects a one-time price in subscription mode with a Stripe-shaped 400", async () => {
+    const { app } = setup();
+    const res = await app.request("/v1/checkout/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "subscription",
+        customer: "cus_acme",
+        line_items: [{ price: "price_once", quantity: 1 }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatchObject({
+      type: "invalid_request_error",
+      param: "line_items[0][price]",
+    });
+  });
+
+  it("offers and accepts only recurring prices in the subscription's currency", async () => {
+    const { app } = setup();
+    const session = await checkout(app);
+    await app.request(`/checkout/${session.id}/complete`, { method: "POST" });
+    const {
+      data: [sub],
+    } = await (await app.request("/v1/subscriptions?status=all")).json();
+    const portal = await (
+      await app.request("/v1/billing_portal/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customer: "cus_acme", return_url: "https://app.example.com/settings/billing" }),
+      })
+    ).json();
+    const page = await (await app.request(`/portal/${portal.id}`)).text();
+    expect(page).toContain('value="price_year"');
+    expect(page).not.toContain('value="price_eur_year"');
+    expect(page).not.toContain('value="price_once"');
+    const post = (price: string) =>
+      app.request(`/portal/${portal.id}/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ subscription: sub.id, price }).toString(),
+      });
+    expect((await post("price_eur_year")).status).toBe(400);
+    expect((await post("price_once")).status).toBe(400);
+    expect((await post("price_year")).status).toBe(302);
   });
 });
