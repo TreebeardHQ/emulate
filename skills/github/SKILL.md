@@ -402,6 +402,8 @@ For inline comments submitted with a native Git review, omit `side` to use `RIGH
 
 Use `COMMENT` to submit a review on a pull request you authored. Self-submitted `APPROVE` and `REQUEST_CHANGES` return HTTP 422 with distinct GitHub refusal messages.
 
+To change the summary of a pending or submitted review, send `body` with `PUT /repos/:owner/:repo/pulls/:number/reviews/:id`.
+
 ### Labels & Milestones
 
 Full CRUD for labels and milestones. Add/remove labels from issues, replace all labels. List labels for a milestone.

@@ -68,6 +68,7 @@ GitHub API coverage:
   Review support includes native diff anchors, statuses, branch protection reads, and a focused merge-gate GraphQL query.
   Native review creation uses RIGHT for an omitted inline comment side and validates the diff anchor.
   Self-submitted approvals and change requests return distinct GitHub 422 messages. Authors can submit COMMENT.
+  Review updates edit the summary body in place for pending and submitted reviews.
   Pull request conversation comments include issue.pull_request in issue_comment webhooks.
   Check run responses include output.annotations_url, which links to the annotations endpoint.
   Check-run lists paginate with page/per_page (default 30, maximum 100) and Link headers.

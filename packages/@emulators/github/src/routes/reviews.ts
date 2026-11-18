@@ -305,9 +305,6 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
 
     const existing = findReview(gh, repo, pullNumber, reviewId);
     if (!existing) throw notFoundResponse();
-    if (existing.state !== "PENDING") {
-      throw new ApiError(422, "Validation failed");
-    }
 
     const raw = await parseJsonBody(c);
     if (typeof raw.body !== "string" && raw.body !== null) {

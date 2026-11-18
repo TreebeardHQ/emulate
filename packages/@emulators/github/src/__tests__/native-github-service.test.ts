@@ -351,15 +351,44 @@ describe("native GitHub service", () => {
       ]);
       expect(validReview.status).toBe(201);
       const posted = service.inspectGitHubState();
-      expect(posted.reviews[0]?.commit_id).toBe(fixture.headSha);
+      const [postedReview] = posted.reviews;
+      if (!postedReview) throw new Error("Expected a submitted review");
+      expect(postedReview.commit_id).toBe(fixture.headSha);
       expect(posted.comments).toMatchObject([
         { path: "review.txt", line: 1, side: "RIGHT", body: "comment with default side" },
         { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
       ]);
 
+      const putReview = (id: number, body: unknown) =>
+        service.fetch(new Request(`${reviewsUrl}/${id}`, {
+          method: "PUT",
+          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ body }),
+        }));
+      const edited = await putReview(postedReview.id, "Updated submitted review");
+      expect(edited.status).toBe(200);
+      expect(await edited.json()).toMatchObject({
+        id: postedReview.id,
+        state: "COMMENTED",
+        commit_id: fixture.headSha,
+        body: "Updated submitted review",
+      });
+      expect((await putReview(postedReview.id, 42)).status).toBe(422);
+      expect((await putReview(postedReview.id + 1, "Unknown review")).status).toBe(404);
+      const afterEdits = service.inspectGitHubState();
+      expect(afterEdits.reviews).toEqual([{ ...postedReview, body: "Updated submitted review" }]);
+      expect(afterEdits.comments).toEqual(posted.comments);
+
       const pending = await postReview(reviewsUrl, { body: "A pending review" });
       expect(pending.status).toBe(201);
       const pendingReview: { id: number } = await pending.json();
+      const editedPending = await putReview(pendingReview.id, "Updated pending review");
+      expect(editedPending.status).toBe(200);
+      expect(await editedPending.json()).toMatchObject({
+        id: pendingReview.id,
+        state: "PENDING",
+        body: "Updated pending review",
+      });
       const submitUrl = `${reviewsUrl}/${pendingReview.id}/events`;
       const refusals = [
         ["APPROVE", "Review Can not approve your own pull request"],

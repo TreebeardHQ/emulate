@@ -924,6 +924,8 @@ When creating a review on a native Git repository, inline comments with a line a
 
 Authors can post `COMMENT` reviews on their own pull requests. An `APPROVE` or `REQUEST_CHANGES` self-review returns HTTP 422 with the corresponding GitHub refusal message.
 
+Use `PUT /repos/:owner/:repo/pulls/:number/reviews/:id` to edit the summary of a pending or submitted review in place.
+
 ### Labels & Milestones
 - Labels: full CRUD, add/remove from issues, replace all
 - Milestones: full CRUD, state transitions, issue counts

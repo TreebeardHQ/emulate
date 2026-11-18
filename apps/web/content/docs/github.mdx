@@ -182,6 +182,8 @@ When creating a review on a native Git repository, an omitted inline comment `si
 
 Creating a submitted review or submitting a pending review returns the corresponding HTTP 422 message for a self-review. `APPROVE` returns `Review Can not approve your own pull request`. `REQUEST_CHANGES` returns `Review Can not request changes on your own pull request`. Authors can submit `COMMENT` on their own pull requests.
 
+Send `body` to `PUT /repos/:owner/:repo/pulls/:number/reviews/:id` to edit a pending or submitted review's summary. The updated review keeps its ID, state, commit, and inline comments.
+
 ## Labels & Milestones
 
 - Labels: full CRUD, add/remove from issues, replace all
