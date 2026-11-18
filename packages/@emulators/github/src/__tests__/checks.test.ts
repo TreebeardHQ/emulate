@@ -273,7 +273,13 @@ describe("GitHub checks routes", () => {
 });
 
 type CheckApp = { id: number; slug: string; name: string } | null;
-type CheckRun = { id: number; head_sha: string; app: CheckApp; check_suite: { id: number } };
+type CheckRun = {
+  id: number;
+  head_sha: string;
+  app: CheckApp;
+  check_suite: { id: number };
+  output: { annotations_url: string };
+};
 type CheckSuite = { id: number; app: CheckApp; status: string; conclusion: string | null };
 
 describe("GitHub checks App attribution", () => {
@@ -365,14 +371,28 @@ describe("GitHub checks App attribution", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("attributes created runs and suites to the authenticated App on all read endpoints", async () => {
-    const run = await createRun(tokenA);
-    expect(run.app).toMatchObject(appA);
+    const annotation = {
+      path: "README.md",
+      start_line: 1,
+      end_line: 1,
+      annotation_level: "notice",
+      message: "Check annotation",
+    };
+    const run = await createRun(tokenA, { output: { annotations: [annotation] } });
+    const expectedRun = {
+      app: appA,
+      output: { annotations_url: `${repoUrl}/check-runs/${run.id}/annotations` },
+    };
+    expect(run).toMatchObject(expectedRun);
     const read = await get(`/check-runs/${run.id}`);
-    expect(await read.json()).toMatchObject({ app: appA });
+    expect(await read.json()).toMatchObject(expectedRun);
+    const annotations = await app.request(run.output.annotations_url, { headers: headers(tokenA) });
+    expect(annotations.status).toBe(200);
+    expect(await annotations.json()).toMatchObject({ total_count: 1, check_annotations: [annotation] });
     const suite = await get(`/check-suites/${run.check_suite.id}`);
     expect(await suite.json()).toMatchObject({ app: appA });
     for (const path of ["/commits/main/check-runs", `/check-suites/${run.check_suite.id}/check-runs`]) {
-      expect(await (await get(path)).json()).toMatchObject({ check_runs: [{ app: appA }] });
+      expect(await (await get(path)).json()).toMatchObject({ check_runs: [expectedRun] });
     }
     expect(await (await get("/commits/main/check-suites")).json()).toMatchObject({ check_suites: [{ app: appA }] });
     for (const response of [run, await (await get(`/check-suites/${run.check_suite.id}`)).json()]) {
@@ -439,6 +459,7 @@ describe("GitHub checks App attribution", () => {
     expect(updated.status).toBe(200);
     const body = (await updated.json()) as CheckRun;
     expect(body.app).toMatchObject(appA);
+    expect(body.output.annotations_url).toBe(`${repoUrl}/check-runs/${run.id}/annotations`);
     expect(body.check_suite.id).not.toBe(run.check_suite.id);
     expect(await (await get(`/check-suites/${body.check_suite.id}`)).json()).toMatchObject({ app: appA });
     const rerequested = await app.request(`${repoUrl}/check-runs/${run.id}/rerequest`, {

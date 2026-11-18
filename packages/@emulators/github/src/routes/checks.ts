@@ -196,7 +196,7 @@ function formatRepoBrief(repo: GitHubRepo, gh: GitHubStore, baseUrl: string) {
 }
 
 function formatCheckRun(run: GitHubCheckRun, repo: GitHubRepo, gh: GitHubStore, baseUrl: string) {
-  const repoUrl = `${baseUrl}/repos/${repo.full_name}`;
+  const checkRunUrl = `${baseUrl}/repos/${repo.full_name}/check-runs/${run.id}`;
   const suite = run.check_suite_id ? gh.checkSuites.get(run.check_suite_id) : null;
   const ghApp = run.app_id == null ? undefined : gh.apps.findOneBy("app_id", run.app_id);
   return {
@@ -209,7 +209,7 @@ function formatCheckRun(run: GitHubCheckRun, repo: GitHubRepo, gh: GitHubStore, 
     started_at: run.started_at,
     completed_at: run.completed_at,
     external_id: run.external_id,
-    url: `${repoUrl}/check-runs/${run.id}`,
+    url: checkRunUrl,
     html_url: `${baseUrl}/${repo.full_name}/commit/${run.head_sha}/checks/${run.id}`,
     details_url: run.details_url,
     output: {
@@ -217,6 +217,7 @@ function formatCheckRun(run: GitHubCheckRun, repo: GitHubRepo, gh: GitHubStore, 
       summary: run.output.summary,
       text: run.output.text,
       annotations_count: run.output.annotations_count,
+      annotations_url: `${checkRunUrl}/annotations`,
     },
     check_suite: suite ? formatCheckSuiteBrief(suite, repo, baseUrl) : null,
     app: ghApp ? formatApp(ghApp, baseUrl) : null,
