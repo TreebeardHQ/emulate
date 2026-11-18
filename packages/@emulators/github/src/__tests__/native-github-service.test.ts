@@ -319,19 +319,22 @@ describe("native GitHub service", () => {
       expect(diffResponse.headers.get("Content-Type")).toContain("application/vnd.github.v3.diff");
       expect(await diffResponse.text()).toContain("diff --git a/review.txt b/review.txt");
       const reviewsUrl = "http://localhost/repos/fixture-user/project/pulls/1/reviews";
-      const postReview = (comments: { path: string; line: number; side?: string | null; body: string }[]) =>
-        service.fetch(new Request(reviewsUrl, {
+      const postReview = (url: string, body: Record<string, unknown>) =>
+        service.fetch(new Request(url, {
           method: "POST",
           headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
-          body: JSON.stringify({ event: "COMMENT", commit_id: fixture.headSha, comments }),
+          body: JSON.stringify(body),
         }));
-      const invalidReview = await postReview([
+      const postComments = (comments: { path: string; line: number; side?: string | null; body: string }[]) =>
+        postReview(reviewsUrl, { event: "COMMENT", commit_id: fixture.headSha, comments });
+      const invalidReview = await postComments([
         { path: "review.txt", line: 1, side: "RIGHT", body: "valid anchor first" },
         { path: "review.txt", line: 99, body: "invalid right anchor second" },
       ]);
       expect(invalidReview.status).toBe(422);
+      expect(await invalidReview.json()).toMatchObject({ message: "Validation failed" });
       for (const side of [null, "CENTER"]) {
-        const invalidSide = await postReview([
+        const invalidSide = await postComments([
           { path: "review.txt", line: 1, side, body: "invalid explicit side" },
         ]);
         expect(invalidSide.status).toBe(422);
@@ -342,7 +345,7 @@ describe("native GitHub service", () => {
         }),
       );
       expect(await emptyReviews.json()).toEqual([]);
-      const validReview = await postReview([
+      const validReview = await postComments([
         { path: "review.txt", line: 1, body: "comment with default side" },
         { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
       ]);
@@ -353,6 +356,25 @@ describe("native GitHub service", () => {
         { path: "review.txt", line: 1, side: "RIGHT", body: "comment with default side" },
         { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
       ]);
+
+      const pending = await postReview(reviewsUrl, { body: "A pending review" });
+      expect(pending.status).toBe(201);
+      const pendingReview: { id: number } = await pending.json();
+      const submitUrl = `${reviewsUrl}/${pendingReview.id}/events`;
+      const refusals = [
+        ["APPROVE", "Review Can not approve your own pull request"],
+        ["REQUEST_CHANGES", "Review Can not request changes on your own pull request"],
+      ] as const;
+      for (const [event, message] of refusals) {
+        for (const url of [reviewsUrl, submitUrl]) {
+          const rejected = await postReview(url, { event, body: "A self review" });
+          expect(rejected.status).toBe(422);
+          expect(await rejected.json()).toMatchObject({ message });
+        }
+      }
+      const submitted = await postReview(submitUrl, { event: "COMMENT" });
+      expect(submitted.status).toBe(200);
+      expect(await submitted.json()).toMatchObject({ state: "COMMENTED" });
 
       server = createServer(async (incoming, outgoing) => {
         const chunks: Buffer[] = [];

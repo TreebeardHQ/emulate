@@ -922,6 +922,8 @@ The `issue_comment` webhook includes `issue.pull_request` for pull request conve
 
 When creating a review on a native Git repository, inline comments with a line and no `side` use the right side of the diff. The emulator validates the anchor against the selected commit.
 
+Authors can post `COMMENT` reviews on their own pull requests. An `APPROVE` or `REQUEST_CHANGES` self-review returns HTTP 422 with the corresponding GitHub refusal message.
+
 ### Labels & Milestones
 - Labels: full CRUD, add/remove from issues, replace all
 - Milestones: full CRUD, state transitions, issue counts

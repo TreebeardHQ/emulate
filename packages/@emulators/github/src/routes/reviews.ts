@@ -63,6 +63,14 @@ function parseSubmitEvent(raw: unknown): "APPROVE" | "REQUEST_CHANGES" | "COMMEN
   throw new ApiError(422, "Validation failed");
 }
 
+function rejectSelfReview(event: ReturnType<typeof parseSubmitEvent>, actorId: number, authorId: number): void {
+  if (actorId !== authorId || event === "COMMENT") return;
+  const message = event === "APPROVE"
+    ? "Review Can not approve your own pull request"
+    : "Review Can not request changes on your own pull request";
+  throw new ApiError(422, message);
+}
+
 function eventToState(event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"): GitHubReview["state"] {
   switch (event) {
     case "APPROVE":
@@ -155,9 +163,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
       throw new ApiError(422, "Validation failed");
     }
     const event = hasEvent ? parseSubmitEvent(eventRaw) : undefined;
-    if (event && event !== "COMMENT" && actor.id === pr.user_id) {
-      throw new ApiError(422, "You cannot approve or request changes on your own pull request.");
-    }
+    if (event) rejectSelfReview(event, actor.id, pr.user_id);
 
     let bodyText: string | null = null;
     if (typeof raw.body === "string") bodyText = raw.body;
@@ -340,9 +346,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
 
     const raw = await parseJsonBody(c);
     const event = parseSubmitEvent(raw.event);
-    if (event !== "COMMENT" && actor.id === pr.user_id) {
-      throw new ApiError(422, "You cannot approve or request changes on your own pull request.");
-    }
+    rejectSelfReview(event, actor.id, pr.user_id);
 
     let bodyText: string | null = review.body;
     if (typeof raw.body === "string") bodyText = raw.body;
