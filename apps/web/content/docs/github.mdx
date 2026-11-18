@@ -168,6 +168,8 @@ Organization `members` are optional. Each entry references a seeded user by `log
 - Commit comments: full CRUD on `/repos/:owner/:repo/commits/:sha/comments`
 - Repo-wide listings for each type
 
+The `issue_comment` webhook includes `issue.pull_request` for pull request conversation comments. It contains the pull request API, page, diff, and patch URLs and its merge timestamp.
+
 ## Reviews
 
 - `GET /repos/:owner/:repo/pulls/:number/reviews` - list

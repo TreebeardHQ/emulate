@@ -911,6 +911,8 @@ Every endpoint below is fully stateful. Creates, updates, and deletes persist in
 - Commit comments: full CRUD on `/repos/:owner/:repo/commits/:sha/comments`
 - Repo-wide listings for each type
 
+The `issue_comment` webhook includes `issue.pull_request` for pull request conversation comments. Use that object to link to the pull request.
+
 ### Reviews
 - `GET /repos/:owner/:repo/pulls/:number/reviews` - list
 - `POST /repos/:owner/:repo/pulls/:number/reviews` - create (with inline comments)

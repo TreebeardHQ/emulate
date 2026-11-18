@@ -385,6 +385,8 @@ curl http://localhost:4001/repos/octocat/hello-world/pulls/comments
 curl http://localhost:4001/repos/octocat/hello-world/comments
 ```
 
+Use `issue.pull_request` in `issue_comment` payloads to identify pull request conversation comments.
+
 ### Reviews
 
 ```bash

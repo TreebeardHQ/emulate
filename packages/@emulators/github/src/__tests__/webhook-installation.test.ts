@@ -303,7 +303,7 @@ describe("webhook installation enrichment", () => {
     expect(body.installation).toBeUndefined();
   });
 
-  it("signs pull_request opened and closed webhooks with the top-level PR number", async () => {
+  it("signs pull request lifecycle and issue comment webhooks with their PR identity", async () => {
     const secret = "test-pull-request-webhook-secret";
     const { app, webhooks } = createTestApp({
       users: [{ login: "octocat" }],
@@ -314,7 +314,7 @@ describe("webhook installation enrichment", () => {
           slug: "pr-app",
           name: "PR App",
           private_key: "fake-key",
-          events: ["pull_request"],
+          events: ["pull_request", "issue_comment"],
           installations: [
             {
               installation_id: 1,
@@ -328,7 +328,7 @@ describe("webhook installation enrichment", () => {
 
     webhooks.register({
       url: "https://hooks.example/receiver",
-      events: ["pull_request"],
+      events: ["pull_request", "issue_comment"],
       active: true,
       owner: "octocat",
       repo: "hello-world",
@@ -344,23 +344,82 @@ describe("webhook installation enrichment", () => {
     const prData = (await createRes.json()) as { number: number };
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
 
-    const expectPullRequestDelivery = (action: "opened" | "closed", merged: boolean) => {
+    const signedDelivery = (
+      event: "pull_request" | "issue_comment",
+    ): { pull_request?: { merged_at?: unknown } } => {
       const [, init] = mockFetch.mock.calls[0]!;
       const rawBody = (init as RequestInit).body as string;
       const headers = (init as RequestInit).headers as Record<string, string>;
-      expect(headers["X-GitHub-Event"]).toBe("pull_request");
+      expect(headers["X-GitHub-Event"]).toBe(event);
       expect(headers["X-Hub-Signature-256"]).toBe(
         `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`,
       );
-      expect(JSON.parse(rawBody)).toMatchObject({
+      return JSON.parse(rawBody);
+    };
+    const expectPullRequestDelivery = (action: "opened" | "closed", merged: boolean) =>
+      expect(signedDelivery("pull_request")).toMatchObject({
         action,
         number: prData.number,
         pull_request: { number: prData.number, merged },
         installation: { id: 1 },
       });
-    };
     expectPullRequestDelivery("opened", false);
 
+    const repoPath = `${base}/repos/octocat/hello-world`;
+    const requestHeaders = { ...authHeaders(), "Content-Type": "application/json" };
+    const createComment = (number: number) =>
+      app.request(`${repoPath}/issues/${number}/comments`, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({ body: "Please check this change" }),
+      });
+    const pullRequestLink = {
+      url: `${repoPath}/pulls/${prData.number}`,
+      html_url: `${base}/octocat/hello-world/pull/${prData.number}`,
+      diff_url: `${base}/octocat/hello-world/pull/${prData.number}.diff`,
+      patch_url: `${base}/octocat/hello-world/pull/${prData.number}.patch`,
+      merged_at: null,
+    };
+    mockFetch.mockClear();
+    const commentRes = await createComment(prData.number);
+    expect(commentRes.status).toBe(201);
+    const comment = (await commentRes.json()) as { id: number };
+    const expectPullComment = async (action: "created" | "edited" | "deleted") => {
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      expect(signedDelivery("issue_comment")).toMatchObject({
+        action,
+        issue: { number: prData.number, pull_request: pullRequestLink },
+        comment: { id: comment.id },
+        installation: { id: 1 },
+      });
+      mockFetch.mockClear();
+    };
+    await expectPullComment("created");
+
+    const commentPath = `${repoPath}/issues/comments/${comment.id}`;
+    const edited = await app.request(commentPath, {
+      method: "PATCH",
+      headers: requestHeaders,
+      body: JSON.stringify({ body: "Please also check the tests" }),
+    });
+    expect(edited.status).toBe(200);
+    await expectPullComment("edited");
+    const deleted = await app.request(commentPath, { method: "DELETE", headers: requestHeaders });
+    expect(deleted.status).toBe(204);
+    await expectPullComment("deleted");
+
+    const issueRes = await app.request(`${repoPath}/issues`, {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({ title: "An ordinary issue" }),
+    });
+    expect(issueRes.status).toBe(201);
+    const issue = (await issueRes.json()) as { number: number };
+    expect((await createComment(issue.number)).status).toBe(201);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    const issueDelivery = signedDelivery("issue_comment");
+    expect(issueDelivery).toMatchObject({ action: "created", issue: { number: issue.number } });
+    expect(issueDelivery).not.toHaveProperty("issue.pull_request");
     mockFetch.mockClear();
 
     const mergeRes = await app.request(`${base}/repos/octocat/hello-world/pulls/${prData.number}/merge`, {
@@ -372,6 +431,14 @@ describe("webhook installation enrichment", () => {
 
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
     expectPullRequestDelivery("closed", true);
+    const mergedAt = signedDelivery("pull_request").pull_request?.merged_at;
+    expect(typeof mergedAt).toBe("string");
+    mockFetch.mockClear();
+    expect((await createComment(prData.number)).status).toBe(201);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    expect(signedDelivery("issue_comment")).toMatchObject({
+      issue: { number: prData.number, pull_request: { ...pullRequestLink, merged_at: mergedAt } },
+    });
   });
 
   it("respects selected repository_selection", async () => {

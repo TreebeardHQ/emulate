@@ -334,11 +334,24 @@ export function formatRepo(repo: GitHubRepo, store: GitHubStore, baseUrl: string
   };
 }
 
+function pullRequestUrls(repo: GitHubRepo, number: number, baseUrl: string) {
+  const htmlUrl = `${baseUrl}/${repo.full_name}/pull/${number}`;
+  return {
+    url: `${baseUrl}/repos/${repo.full_name}/pulls/${number}`,
+    html_url: htmlUrl,
+    diff_url: `${htmlUrl}.diff`,
+    patch_url: `${htmlUrl}.patch`,
+  };
+}
+
 export function formatIssue(issue: GitHubIssue, store: GitHubStore, baseUrl: string) {
   const repo = store.repos.get(issue.repo_id);
   if (!repo) return null;
   const user = store.users.get(issue.user_id);
   const repoUrl = `${baseUrl}/repos/${repo.full_name}`;
+  const pullRequest = issue.is_pull_request
+    ? store.pullRequests.findBy("repo_id", repo.id).find((pr) => pr.number === issue.number)
+    : undefined;
 
   const labels = issue.label_ids
     .map((id) => store.labels.get(id))
@@ -383,6 +396,12 @@ export function formatIssue(issue: GitHubIssue, store: GitHubStore, baseUrl: str
     timeline_url: `${repoUrl}/issues/${issue.number}/timeline`,
     performed_via_github_app: null,
     author_association: computeAuthorAssociation(store, issue.user_id, issue.repo_id),
+    ...(pullRequest && {
+      pull_request: {
+        ...pullRequestUrls(repo, pullRequest.number, baseUrl),
+        merged_at: pullRequest.merged_at,
+      },
+    }),
   };
 }
 
@@ -391,6 +410,7 @@ export function formatPullRequest(pr: GitHubPullRequest, store: GitHubStore, bas
   if (!repo) return null;
   const user = store.users.get(pr.user_id);
   const repoUrl = `${baseUrl}/repos/${repo.full_name}`;
+  const { url, html_url, diff_url, patch_url } = pullRequestUrls(repo, pr.number, baseUrl);
   const headRepo = store.repos.get(pr.head_repo_id);
   const baseRepo = store.repos.get(pr.base_repo_id);
 
@@ -418,12 +438,12 @@ export function formatPullRequest(pr: GitHubPullRequest, store: GitHubStore, bas
   const mergedBy = pr.merged_by_id ? store.users.get(pr.merged_by_id) : null;
 
   return {
-    url: `${repoUrl}/pulls/${pr.number}`,
+    url,
     id: pr.id,
     node_id: pr.node_id,
-    html_url: `${baseUrl}/${repo.full_name}/pull/${pr.number}`,
-    diff_url: `${baseUrl}/${repo.full_name}/pull/${pr.number}.diff`,
-    patch_url: `${baseUrl}/${repo.full_name}/pull/${pr.number}.patch`,
+    html_url,
+    diff_url,
+    patch_url,
     issue_url: `${repoUrl}/issues/${pr.number}`,
     number: pr.number,
     state: pr.state,
