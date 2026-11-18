@@ -178,6 +178,8 @@ The `issue_comment` webhook includes `issue.pull_request` for pull request conve
 - `POST /repos/:owner/:repo/pulls/:number/reviews/:id/events` - submit
 - `PUT /repos/:owner/:repo/pulls/:number/reviews/:id/dismissals` - dismiss
 
+When creating a review on a native Git repository, an omitted inline comment `side` defaults to `RIGHT`. Supply `LEFT` for a deleted line. The emulator validates the path and line against the selected commit's diff and returns HTTP 422 for an invalid anchor or explicit side.
+
 ## Labels & Milestones
 
 - Labels: full CRUD, add/remove from issues, replace all

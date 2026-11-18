@@ -920,6 +920,8 @@ The `issue_comment` webhook includes `issue.pull_request` for pull request conve
 - `POST /repos/:owner/:repo/pulls/:number/reviews/:id/events` - submit
 - `PUT /repos/:owner/:repo/pulls/:number/reviews/:id/dismissals` - dismiss
 
+When creating a review on a native Git repository, inline comments with a line and no `side` use the right side of the diff. The emulator validates the anchor against the selected commit.
+
 ### Labels & Milestones
 - Labels: full CRUD, add/remove from issues, replace all
 - Milestones: full CRUD, state transitions, issue counts

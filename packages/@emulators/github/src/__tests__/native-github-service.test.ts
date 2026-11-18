@@ -318,40 +318,41 @@ describe("native GitHub service", () => {
       );
       expect(diffResponse.headers.get("Content-Type")).toContain("application/vnd.github.v3.diff");
       expect(await diffResponse.text()).toContain("diff --git a/review.txt b/review.txt");
-      const invalidReview = await service.fetch(
-        new Request("http://localhost/repos/fixture-user/project/pulls/1/reviews", {
+      const reviewsUrl = "http://localhost/repos/fixture-user/project/pulls/1/reviews";
+      const postReview = (comments: { path: string; line: number; side?: string | null; body: string }[]) =>
+        service.fetch(new Request(reviewsUrl, {
           method: "POST",
           headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
-          body: JSON.stringify({
-            event: "COMMENT",
-            commit_id: fixture.headSha,
-            comments: [
-              { path: "review.txt", line: 1, side: "RIGHT", body: "valid anchor first" },
-              { path: "review.txt", line: 99, side: "RIGHT", body: "invalid anchor second" },
-            ],
-          }),
-        }),
-      );
+          body: JSON.stringify({ event: "COMMENT", commit_id: fixture.headSha, comments }),
+        }));
+      const invalidReview = await postReview([
+        { path: "review.txt", line: 1, side: "RIGHT", body: "valid anchor first" },
+        { path: "review.txt", line: 99, body: "invalid right anchor second" },
+      ]);
       expect(invalidReview.status).toBe(422);
+      for (const side of [null, "CENTER"]) {
+        const invalidSide = await postReview([
+          { path: "review.txt", line: 1, side, body: "invalid explicit side" },
+        ]);
+        expect(invalidSide.status).toBe(422);
+      }
       const emptyReviews = await service.fetch(
-        new Request("http://localhost/repos/fixture-user/project/pulls/1/reviews", {
+        new Request(reviewsUrl, {
           headers: { Authorization: "Bearer fixture-token" },
         }),
       );
       expect(await emptyReviews.json()).toEqual([]);
-      const validReview = await service.fetch(
-        new Request("http://localhost/repos/fixture-user/project/pulls/1/reviews", {
-          method: "POST",
-          headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" },
-          body: JSON.stringify({
-            event: "COMMENT",
-            commit_id: fixture.headSha,
-            comments: [{ path: "review.txt", line: 1, side: "RIGHT", body: "valid inline comment" }],
-          }),
-        }),
-      );
+      const validReview = await postReview([
+        { path: "review.txt", line: 1, body: "comment with default side" },
+        { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
+      ]);
       expect(validReview.status).toBe(201);
-      expect(service.inspectGitHubState().reviews[0]?.commit_id).toBe(fixture.headSha);
+      const posted = service.inspectGitHubState();
+      expect(posted.reviews[0]?.commit_id).toBe(fixture.headSha);
+      expect(posted.comments).toMatchObject([
+        { path: "review.txt", line: 1, side: "RIGHT", body: "comment with default side" },
+        { path: "renamed.txt", line: 1, side: "LEFT", body: "comment on a deleted line" },
+      ]);
 
       server = createServer(async (incoming, outgoing) => {
         const chunks: Buffer[] = [];

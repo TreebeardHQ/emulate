@@ -204,7 +204,7 @@ export function reviewsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
       }
       if (nativeGit) {
         const line = o.line;
-        const side = o.side;
+        const side = o.side === undefined ? "RIGHT" : o.side;
         if (typeof line !== "number" || !Number.isSafeInteger(line) || line < 1 || (side !== "LEFT" && side !== "RIGHT")) {
           throw new ApiError(422, "Validation failed");
         }

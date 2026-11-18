@@ -398,6 +398,8 @@ curl -X POST http://localhost:4001/repos/octocat/hello-world/pulls/1/reviews \
   -d '{"event": "APPROVE", "body": "LGTM"}'
 ```
 
+For inline comments submitted with a native Git review, omit `side` to use `RIGHT`, or specify `LEFT` for a deleted line. Use a path and line from the selected commit's diff.
+
 ### Labels & Milestones
 
 Full CRUD for labels and milestones. Add/remove labels from issues, replace all labels. List labels for a milestone.
