@@ -1,8 +1,10 @@
 import { randomBytes } from "crypto";
-import type { RouteContext, AuthApp } from "@emulators/core";
+import type { RouteContext, AuthApp, AuthUser } from "@emulators/core";
+import { parsePagination, setLinkHeader } from "@emulators/core";
 import { getGitHubStore } from "../store.js";
+import { isOrgMember } from "../route-helpers.js";
 import { formatApp } from "../helpers.js";
-import { getInstallationTokenExpiries } from "../tokens.js";
+import { getInstallationTokenExpiries, getTokenToAppId } from "../tokens.js";
 
 export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): void {
   const gh = getGitHubStore(store);
@@ -57,6 +59,38 @@ export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): voi
     const ghApp = gh.apps.all().find((a) => a.app_id === authApp.appId);
 
     return c.json(installations.map((inst) => formatInstallation(inst, ghApp, baseUrl)));
+  });
+
+  // Installations the signed-in user can access: on their own account or on an org they belong to.
+  // A token from an App installation sees only that App's installations, as on GitHub.
+  app.get("/user/installations", (c) => {
+    const authUser = c.get("authUser") as AuthUser | undefined;
+    if (authUser?.installation) {
+      return c.json(
+        { message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest" },
+        403,
+      );
+    }
+    const user = authUser ? gh.users.findOneBy("login", authUser.login) : undefined;
+    if (!user) {
+      return c.json({ message: "Requires authentication", documentation_url: "https://docs.github.com/rest" }, 401);
+    }
+
+    const tokenAppId = getTokenToAppId(store).get(String(c.get("authToken") ?? ""));
+    const accessible = gh.appInstallations
+      .all()
+      .filter((inst) => tokenAppId === undefined || inst.app_id === tokenAppId)
+      .filter((inst) =>
+        inst.account_type === "User" ? inst.account_id === user.id : isOrgMember(gh, user.id, inst.account_id),
+      );
+    const { page, per_page } = parsePagination(c);
+    setLinkHeader(c, accessible.length, page, per_page);
+    return c.json({
+      total_count: accessible.length,
+      installations: accessible
+        .slice((page - 1) * per_page, page * per_page)
+        .map((inst) => formatInstallation(inst, gh.apps.all().find((a) => a.app_id === inst.app_id), baseUrl)),
+    });
   });
 
   app.get("/app/installations/:installation_id", (c) => {

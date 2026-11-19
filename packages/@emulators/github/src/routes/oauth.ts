@@ -16,14 +16,18 @@ import {
   debug,
 } from "@emulators/core";
 import { getGitHubStore } from "../store.js";
+import type { GitHubAppInstallation, GitHubUser } from "../entities.js";
 import { formatUser, formatUserFull } from "../helpers.js";
-import { getTokenToClientId, revokeOAuthGrant, revokeOAuthToken } from "../tokens.js";
+import { isOrgMember } from "../route-helpers.js";
+import { getTokenToAppId, getTokenToClientId, revokeOAuthGrant, revokeOAuthToken } from "../tokens.js";
 
 type PendingCode = {
   login: string;
   scope: string;
   redirectUri: string;
   clientId: string;
+  /** Set for a code issued by an App installation: its user token sees only that App's installations. */
+  appId?: number;
   created_at: number;
 };
 
@@ -81,6 +85,31 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
       }
     }
     return null;
+  }
+
+  /** Mint a single-use user code for `login` and sign the browser in as them. */
+  function issueCode(c: Context<AppEnv>, pending: Omit<PendingCode, "created_at">): string {
+    const code = randomBytes(20).toString("hex");
+    getPendingCodes(store).set(code, { ...pending, created_at: Date.now() });
+
+    debug(
+      "github.oauth",
+      `[OAuth callback] generated code: ${code.slice(0, 8)}... for login=${pending.login}, pendingCodes size: ${getPendingCodes(store).size}`,
+    );
+
+    const sessionId = randomBytes(24).toString("base64url");
+    getSessionMap(store).set(sessionId, pending.login);
+    c.header("Set-Cookie", `_emu_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax`);
+    return code;
+  }
+
+  /** Seeded users who can install on an installation's account: the user it belongs to, or the org's members. */
+  function installersOf(inst: GitHubAppInstallation): GitHubUser[] {
+    if (inst.account_type === "User") {
+      const user = gh.users.get(inst.account_id);
+      return user ? [user] : [];
+    }
+    return gh.users.all().filter((user) => isOrgMember(gh, user.id, inst.account_id));
   }
 
   // ---------- OAuth authorize page ----------
@@ -159,28 +188,85 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
     const state = String(body.state ?? "");
     const client_id = String(body.client_id ?? "");
 
-    const code = randomBytes(20).toString("hex");
-    getPendingCodes(store).set(code, {
-      login,
-      scope,
-      redirectUri: redirect_uri,
-      clientId: client_id,
-      created_at: Date.now(),
-    });
-
-    debug(
-      "github.oauth",
-      `[OAuth callback] generated code: ${code.slice(0, 8)}... for login=${login}, pendingCodes size: ${getPendingCodes(store).size}`,
-    );
-
-    const sessionId = randomBytes(24).toString("base64url");
-    getSessionMap(store).set(sessionId, login);
-    c.header("Set-Cookie", `_emu_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax`);
+    const code = issueCode(c, { login, scope, redirectUri: redirect_uri, clientId: client_id });
 
     const sep = redirect_uri.includes("?") ? "&" : "?";
     const target = `${redirect_uri}${sep}code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
     debug("github.oauth", `[OAuth callback] redirecting to: ${target.slice(0, 120)}...`);
     return c.redirect(target, 302);
+  });
+
+  // ---------- GitHub App installation ----------
+
+  // GitHub's install page lets the user pick an account, then redirects to the App's
+  // setup URL with installation_id, setup_action and, when the App requests user
+  // authorization during installation, a user code and the state. Installations are
+  // seeded, so the page offers each seeded installation of the App once per user who
+  // can manage it. Seeded Apps have no setup URL: a sandbox copy's callback origin
+  // changes per copy, so the caller names it as redirect_uri.
+  const installPage = (c: Context<AppEnv>) => {
+    const slug = c.req.param("slug") ?? "";
+    const ghApp = gh.apps.findOneBy("slug", slug);
+    if (!ghApp) {
+      return c.html(renderErrorPage("App not found", `No GitHub App '${slug}' is seeded.`, SERVICE_LABEL), 404);
+    }
+    const redirect_uri = c.req.query("redirect_uri") ?? "";
+    if (!isHttpUrl(redirect_uri)) {
+      return c.html(
+        renderErrorPage("Setup URL required", "Pass the App's setup URL as an http(s) redirect_uri.", SERVICE_LABEL),
+        400,
+      );
+    }
+    const state = c.req.query("state") ?? "";
+
+    const buttons = gh.appInstallations
+      .findBy("app_id", ghApp.app_id)
+      .flatMap((inst) => {
+        const account =
+          inst.account_type === "Organization" ? gh.orgs.get(inst.account_id) : gh.users.get(inst.account_id);
+        if (!account) return [];
+        return installersOf(inst).map((user) =>
+          renderUserButton({
+            letter: (account.login[0] ?? "?").toUpperCase(),
+            login: user.login,
+            name: `Install on ${account.login}`,
+            formAction: `/apps/${encodeURIComponent(slug)}/installations/confirm`,
+            hiddenFields: { login: user.login, installation_id: String(inst.installation_id), redirect_uri, state },
+          }),
+        );
+      })
+      .join("\n");
+
+    const body =
+      buttons || '<p class="empty">No seeded installation of this App has a seeded user to install it.</p>';
+    return c.html(renderCardPage(`Install ${ghApp.name}`, "Choose where to install this App.", body, SERVICE_LABEL));
+  };
+  app.get("/apps/:slug/installations/new", installPage);
+  app.get("/apps/:slug/installations/select_target", installPage);
+
+  app.post("/apps/:slug/installations/confirm", async (c) => {
+    const body = (await c.req.parseBody()) as Record<string, string>;
+    const ghApp = gh.apps.findOneBy("slug", c.req.param("slug") ?? "");
+    const installationId = Number(body.installation_id);
+    const inst = ghApp
+      ? gh.appInstallations.all().find((i) => i.installation_id === installationId && i.app_id === ghApp.app_id)
+      : undefined;
+    const login = String(body.login ?? "");
+    const redirect_uri = String(body.redirect_uri ?? "");
+    if (!inst || !installersOf(inst).some((user) => user.login === login) || !isHttpUrl(redirect_uri)) {
+      return c.html(
+        renderErrorPage("Installation not found", "That user cannot install this App there.", SERVICE_LABEL),
+        400,
+      );
+    }
+
+    const code = issueCode(c, { login, scope: "", redirectUri: redirect_uri, clientId: "", appId: inst.app_id });
+    const target = new URL(redirect_uri);
+    target.searchParams.set("installation_id", String(inst.installation_id));
+    target.searchParams.set("setup_action", "install");
+    target.searchParams.set("code", code);
+    if (body.state) target.searchParams.set("state", String(body.state));
+    return c.redirect(target.toString(), 302);
   });
 
   // ---------- Token exchange ----------
@@ -259,7 +345,8 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
     }
 
     // A code issued to another app is an incorrect code for this one, and stays usable by its own app.
-    if (oauthAppsConfigured && pending.clientId !== bodyClientId) {
+    // An App installation's code is bound to no OAuth client (seeded Apps carry no client id).
+    if (oauthAppsConfigured && pending.clientId && pending.clientId !== bodyClientId) {
       debug("github.oauth", `[OAuth token] REJECTED: code was issued to another client_id`);
       return badVerificationCode();
     }
@@ -278,6 +365,7 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
 
     if (tokenMap) {
       tokenMap.set(token, { login: user.login, id: user.id, scopes });
+      if (pending.appId !== undefined) getTokenToAppId(store).set(token, pending.appId);
     }
 
     const oauthApp = gh.oauthApps.findOneBy("client_id", pending.clientId);
@@ -558,4 +646,13 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
     revokeOAuthGrant(store, { login: owner.login, id: owner.id }, clientId, tokenMap);
     return c.body(null, 204);
   });
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }

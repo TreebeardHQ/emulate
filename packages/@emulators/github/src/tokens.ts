@@ -1,6 +1,16 @@
 import type { Store, TokenMap } from "@emulators/core";
 import { getGitHubStore } from "./store.js";
 
+/** User tokens issued through an App installation, mapped to that App's id. */
+export function getTokenToAppId(store: Store): Map<string, number> {
+  let map = store.getData<Map<string, number>>("github.oauth.tokenToAppId");
+  if (!map) {
+    map = new Map();
+    store.setData("github.oauth.tokenToAppId", map);
+  }
+  return map;
+}
+
 /** OAuth access tokens the emulator issued, mapped to the client_id that received them. */
 export function getTokenToClientId(store: Store): Map<string, string> {
   let map = store.getData<Map<string, string>>("github.oauth.tokenToClientId");
@@ -40,6 +50,7 @@ export function getInstallationTokenExpiries(store: Store): Map<string, number> 
 export function revokeOAuthToken(store: Store, tokenMap: TokenMap | undefined, token: string): void {
   tokenMap?.delete(token);
   getTokenToClientId(store).delete(token);
+  getTokenToAppId(store).delete(token);
   getRevokedTokens(store).add(token);
 }
 
