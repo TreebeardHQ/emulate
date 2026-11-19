@@ -3,7 +3,7 @@ import type { RouteContext, AuthApp, AuthUser } from "@emulators/core";
 import { parsePagination, setLinkHeader } from "@emulators/core";
 import { getGitHubStore } from "../store.js";
 import { isOrgMember } from "../route-helpers.js";
-import { formatApp } from "../helpers.js";
+import { formatApp, formatRepo } from "../helpers.js";
 import { getInstallationTokenExpiries, getTokenToAppId } from "../tokens.js";
 
 export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): void {
@@ -90,6 +90,27 @@ export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): voi
       installations: accessible
         .slice((page - 1) * per_page, page * per_page)
         .map((inst) => formatInstallation(inst, gh.apps.all().find((a) => a.app_id === inst.app_id), baseUrl)),
+    });
+  });
+
+  // Repositories an installation token can reach: every repo on the account, or the token's selected repos.
+  app.get("/installation/repositories", (c) => {
+    const installation = (c.get("authUser") as AuthUser | undefined)?.installation;
+    if (!installation) {
+      return c.json({ message: "Bad credentials", documentation_url: "https://docs.github.com/rest" }, 401);
+    }
+    const repos =
+      installation.repositorySelection === "all"
+        ? gh.repos
+            .all()
+            .filter((repo) => repo.owner_id === installation.accountId && repo.owner_type === installation.accountType)
+        : installation.repositoryIds.map((id) => gh.repos.get(id)).filter((repo) => repo !== undefined);
+    const { page, per_page } = parsePagination(c);
+    setLinkHeader(c, repos.length, page, per_page);
+    return c.json({
+      total_count: repos.length,
+      repository_selection: installation.repositorySelection,
+      repositories: repos.slice((page - 1) * per_page, page * per_page).map((repo) => formatRepo(repo, gh, baseUrl)),
     });
   });
 
