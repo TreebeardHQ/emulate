@@ -4,7 +4,7 @@ import { parsePagination, setLinkHeader } from "@emulators/core";
 import { getGitHubStore } from "../store.js";
 import { isOrgMember } from "../route-helpers.js";
 import { formatApp } from "../helpers.js";
-import { getInstallationTokenExpiries } from "../tokens.js";
+import { getInstallationTokenExpiries, getTokenToAppId } from "../tokens.js";
 
 export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): void {
   const gh = getGitHubStore(store);
@@ -62,6 +62,7 @@ export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): voi
   });
 
   // Installations the signed-in user can access: on their own account or on an org they belong to.
+  // A token from an App installation sees only that App's installations, as on GitHub.
   app.get("/user/installations", (c) => {
     const authUser = c.get("authUser") as AuthUser | undefined;
     if (authUser?.installation) {
@@ -75,8 +76,10 @@ export function appsRoutes({ app, store, baseUrl, tokenMap }: RouteContext): voi
       return c.json({ message: "Requires authentication", documentation_url: "https://docs.github.com/rest" }, 401);
     }
 
+    const tokenAppId = getTokenToAppId(store).get(String(c.get("authToken") ?? ""));
     const accessible = gh.appInstallations
       .all()
+      .filter((inst) => tokenAppId === undefined || inst.app_id === tokenAppId)
       .filter((inst) =>
         inst.account_type === "User" ? inst.account_id === user.id : isOrgMember(gh, user.id, inst.account_id),
       );

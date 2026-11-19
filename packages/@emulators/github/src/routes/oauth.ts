@@ -19,13 +19,15 @@ import { getGitHubStore } from "../store.js";
 import type { GitHubAppInstallation, GitHubUser } from "../entities.js";
 import { formatUser, formatUserFull } from "../helpers.js";
 import { isOrgMember } from "../route-helpers.js";
-import { getTokenToClientId, revokeOAuthGrant, revokeOAuthToken } from "../tokens.js";
+import { getTokenToAppId, getTokenToClientId, revokeOAuthGrant, revokeOAuthToken } from "../tokens.js";
 
 type PendingCode = {
   login: string;
   scope: string;
   redirectUri: string;
   clientId: string;
+  /** Set for a code issued by an App installation: its user token sees only that App's installations. */
+  appId?: number;
   created_at: number;
 };
 
@@ -200,7 +202,8 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
   // setup URL with installation_id, setup_action and, when the App requests user
   // authorization during installation, a user code and the state. Installations are
   // seeded, so the page offers each seeded installation of the App once per user who
-  // can manage it; the app's own setup URL comes in as redirect_uri.
+  // can manage it. Seeded Apps have no setup URL: a sandbox copy's callback origin
+  // changes per copy, so the caller names it as redirect_uri.
   const installPage = (c: Context<AppEnv>) => {
     const slug = c.req.param("slug") ?? "";
     const ghApp = gh.apps.findOneBy("slug", slug);
@@ -215,7 +218,6 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
       );
     }
     const state = c.req.query("state") ?? "";
-    const target = c.req.query("suggested_target_id");
 
     const buttons = gh.appInstallations
       .findBy("app_id", ghApp.app_id)
@@ -223,7 +225,6 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
         const account =
           inst.account_type === "Organization" ? gh.orgs.get(inst.account_id) : gh.users.get(inst.account_id);
         if (!account) return [];
-        if (target && target !== account.login && target !== String(account.id)) return [];
         return installersOf(inst).map((user) =>
           renderUserButton({
             letter: (account.login[0] ?? "?").toUpperCase(),
@@ -259,7 +260,7 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
       );
     }
 
-    const code = issueCode(c, { login, scope: "", redirectUri: redirect_uri, clientId: "" });
+    const code = issueCode(c, { login, scope: "", redirectUri: redirect_uri, clientId: "", appId: inst.app_id });
     const target = new URL(redirect_uri);
     target.searchParams.set("installation_id", String(inst.installation_id));
     target.searchParams.set("setup_action", "install");
@@ -344,7 +345,8 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
     }
 
     // A code issued to another app is an incorrect code for this one, and stays usable by its own app.
-    if (oauthAppsConfigured && pending.clientId !== bodyClientId) {
+    // An App installation's code is bound to no OAuth client (seeded Apps carry no client id).
+    if (oauthAppsConfigured && pending.clientId && pending.clientId !== bodyClientId) {
       debug("github.oauth", `[OAuth token] REJECTED: code was issued to another client_id`);
       return badVerificationCode();
     }
@@ -363,6 +365,7 @@ export function oauthRoutes({ app, store, baseUrl, tokenMap }: RouteContext): vo
 
     if (tokenMap) {
       tokenMap.set(token, { login: user.login, id: user.id, scopes });
+      if (pending.appId !== undefined) getTokenToAppId(store).set(token, pending.appId);
     }
 
     const oauthApp = gh.oauthApps.findOneBy("client_id", pending.clientId);

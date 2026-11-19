@@ -26,6 +26,8 @@ function createTestApp() {
   githubPlugin.seed?.(store, base);
   seedFromConfig(store, base, {
     users: [{ login: "alice" }, { login: "bob" }],
+    // A seeded OAuth app turns on client binding; the installation's code must still exchange.
+    oauth_apps: [{ client_id: "Iv1.acme", client_secret: "acme-secret", name: "Acme", redirect_uris: [setupUrl] }],
     orgs: [{ login: "acme", members: [{ login: "alice", role: "admin" }] }],
     apps: [
       {
@@ -34,6 +36,13 @@ function createTestApp() {
         name: "Acme QA",
         private_key: appKey.export({ type: "pkcs8", format: "pem" }).toString(),
         installations: [{ installation_id: 70, account: "acme" }],
+      },
+      {
+        app_id: 8,
+        slug: "acme-other",
+        name: "Acme Other",
+        private_key: appKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        installations: [{ installation_id: 80, account: "acme" }],
       },
     ],
   });
@@ -52,7 +61,7 @@ async function userToken(app: Hono<any>, code: string): Promise<string> {
   const res = await app.request(`${base}/login/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ client_id: "Iv1.acme", client_secret: "unused", code }),
+    body: JSON.stringify({ client_id: "Iv1.acme", client_secret: "acme-secret", code }),
   });
   return ((await res.json()) as { access_token: string }).access_token;
 }
@@ -74,7 +83,7 @@ describe("GitHub App installation flow", () => {
     expect(missing.status).toBe(400);
   });
 
-  it("redirects to the setup URL with the installation, a user code and the state", async () => {
+  it("redirects to the setup URL with a user code whose token lists only that App's installations", async () => {
     const app = createTestApp();
     const res = await confirm(app, "alice");
     expect(res.status).toBe(302);
@@ -108,6 +117,7 @@ describe("GitHub App installation flow", () => {
     const installations = await app.request(`${base}/user/installations`, {
       headers: { Authorization: `Bearer ${await userToken(app, code)}` },
     });
+    // A plain OAuth token is bound to no App; bob belongs to no account either.
     expect(await installations.json()).toEqual({ total_count: 0, installations: [] });
   });
 
